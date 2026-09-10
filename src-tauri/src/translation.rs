@@ -135,7 +135,7 @@ pub async fn translate_with_usage(
         stream: false,
     };
     let client = reqwest::Client::builder()
-        .user_agent("voice-caption-studio/0.1.17")
+        .user_agent("voice-caption-studio/0.1.18")
         .build()
         .map_err(|error| error.to_string())?;
     let response = client

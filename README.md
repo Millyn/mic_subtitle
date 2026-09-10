@@ -9,6 +9,7 @@ Windows 10/11 的本地优先实时中英字幕工具。桌面端使用 Tauri 2 
 - faster-whisper/CTranslate2 与 Qwen3-ASR worker：临时字幕、停顿后的最终字幕，以及中英文/混合语言自动检测；优先使用 WebRTC VAD，并在没有 VAD 时使用启动校准和自适应噪声底，避免底噪把一句话拖到 10 秒硬上限。
 - DeepSeek Chat Completions 翻译接口，API Key 只由桌面端使用；禁用或失败时保留中文识别。
 - 可选择中文优先、中英混合或自动识别；支持程序目录中的本地术语表。完整术语表不会加入 Prompt，单独命中一条术语时直接本地输出，不消耗 API Token。
+- 独立“术语表”页面支持增删查改、搜索、JSON 导入和导出；设备噪声配置按麦克风名称保存，可为 Maono Fairy 原始 Mic 单独设置底噪、语音阈值、VAD 和静音结束时间。
 - OBS Overlay 支持按画布坐标定位字幕，默认以 1920×1080 画布的 X/Y 中心点放置；首页显示本次识别与程序启动累计 Token，用量来源会区分本地 ASR 估算和 DeepSeek API usage。
 - 识别 worker 使用有界音频队列、单线程 faster-whisper、Torch no-grad/inference mode 和临时音频释放，降低 CPU 峰值及长时间运行时的内存堆积。
 - 字幕服务默认监听 `0.0.0.0:39071`，可在“连接与设置”修改端口（占用时回退到随机局域网端口）：
@@ -79,7 +80,7 @@ pip install -r src-tauri/sidecars/requirements.txt
 
 ## Windows 试用包
 
-当前工作区会生成带版本号的 Windows 试用包，例如 `dist-windows/voice-caption-studio-v0.1.17-windows-x64.zip`。解压后双击 `声译-实时字幕工作台.exe` 即可启动桌面端；压缩包内已带 Windows loader、Rust 运行库和 worker 脚本。Windows 10/11 还需要系统安装 WebView2 Runtime。
+当前工作区会生成带版本号的 Windows 试用包，例如 `dist-windows/voice-caption-studio-v0.1.18-windows-x64.zip`。解压后双击 `声译-实时字幕工作台.exe` 即可启动桌面端；压缩包内已带 Windows loader、Rust 运行库和 worker 脚本。Windows 10/11 还需要系统安装 WebView2 Runtime。
 
 若要使用真实语音识别，在解压目录打开 PowerShell，先安装 64 位 Python 运行时和依赖：
 

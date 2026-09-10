@@ -30,6 +30,14 @@ pub fn default_recognition_language() -> String {
     "Chinese".into()
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_silence_ms() -> u32 {
+    700
+}
+
 fn default_canvas_width() -> u32 {
     DEFAULT_CANVAS_WIDTH
 }
@@ -147,6 +155,62 @@ pub struct GlossaryEntry {
     pub target: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoiseProfile {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub auto_calibrate: bool,
+    #[serde(default = "default_true")]
+    pub use_vad: bool,
+    #[serde(default)]
+    pub noise_floor: f32,
+    #[serde(default)]
+    pub speech_threshold: f32,
+    #[serde(default)]
+    pub silence_threshold: f32,
+    #[serde(default = "default_silence_ms")]
+    pub silence_ms: u32,
+}
+
+impl Default for NoiseProfile {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_calibrate: true,
+            use_vad: true,
+            noise_floor: 0.0,
+            speech_threshold: 0.0,
+            silence_threshold: 0.0,
+            silence_ms: default_silence_ms(),
+        }
+    }
+}
+
+impl NoiseProfile {
+    pub fn normalize(&mut self) {
+        self.noise_floor = normalize_rms(self.noise_floor);
+        self.speech_threshold = normalize_rms(self.speech_threshold);
+        self.silence_threshold = normalize_rms(self.silence_threshold);
+        if self.speech_threshold > 0.0
+            && self.silence_threshold > 0.0
+            && self.silence_threshold >= self.speech_threshold
+        {
+            self.silence_threshold = (self.speech_threshold * 0.75).max(0.0005);
+        }
+        self.silence_ms = self.silence_ms.clamp(250, 3_000);
+    }
+}
+
+fn normalize_rms(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 0.9)
+    } else {
+        0.0
+    }
+}
+
 impl Default for DeepSeekConfig {
     fn default() -> Self {
         Self {
@@ -189,6 +253,8 @@ pub struct AppConfig {
     pub recognition_language: String,
     #[serde(default)]
     pub glossary: Vec<GlossaryEntry>,
+    #[serde(default)]
+    pub noise_profiles: HashMap<String, NoiseProfile>,
     pub style: SubtitleStyle,
     #[serde(default = "default_server_port")]
     pub server_port: u16,
@@ -204,6 +270,7 @@ impl Default for AppConfig {
             deepseek: DeepSeekConfig::default(),
             recognition_language: default_recognition_language(),
             glossary: Vec::new(),
+            noise_profiles: HashMap::new(),
             style: SubtitleStyle::default(),
             server_port: DEFAULT_SERVER_PORT,
             models: HashMap::new(),
@@ -233,6 +300,17 @@ impl AppConfig {
             });
         }
         self.glossary = normalized;
+
+        let mut profiles = HashMap::with_capacity(self.noise_profiles.len().min(100));
+        for (device_name, mut profile) in self.noise_profiles.drain().take(100) {
+            let device_name: String = device_name.trim().chars().take(240).collect();
+            if device_name.is_empty() {
+                continue;
+            }
+            profile.normalize();
+            profiles.insert(device_name, profile);
+        }
+        self.noise_profiles = profiles;
     }
 }
 

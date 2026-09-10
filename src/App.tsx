@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
 import {
   deleteModel,
   downloadModel,
@@ -37,6 +37,7 @@ import {
   type HardwareInfo,
   type ModelDownloadProgress,
   type ModelView,
+  type NoiseProfile,
   type Page,
   type ServerStatus,
   type SubtitleEvent,
@@ -58,6 +59,7 @@ const cloneConfig = (config: AppConfig): AppConfig => ({
   deepseek: { ...config.deepseek },
   recognitionLanguage: config.recognitionLanguage || "Chinese",
   glossary: (config.glossary || []).map((entry) => ({ ...entry })),
+  noiseProfiles: Object.fromEntries(Object.entries(config.noiseProfiles || {}).map(([name, profile]) => [name, { ...profile }])),
   style: cloneStyle(config.style),
 });
 
@@ -105,6 +107,47 @@ const parseGlossary = (value: string): GlossaryEntry[] =>
     .filter((entry): entry is GlossaryEntry => Boolean(entry?.source))
     .slice(0, 200);
 
+const defaultNoiseProfile: NoiseProfile = {
+  enabled: true,
+  autoCalibrate: true,
+  useVad: true,
+  noiseFloor: 0,
+  speechThreshold: 0,
+  silenceThreshold: 0,
+  silenceMs: 700,
+};
+
+const cloneNoiseProfile = (profile?: NoiseProfile): NoiseProfile => ({
+  ...defaultNoiseProfile,
+  ...(profile || {}),
+});
+
+const validGlossaryEntries = (entries: GlossaryEntry[]) =>
+  entries
+    .map((entry) => ({ source: entry.source.trim(), target: entry.target.trim() }))
+    .filter((entry) => entry.source && entry.target)
+    .slice(0, 200);
+
+const glossaryEntriesFromJson = (value: unknown): GlossaryEntry[] => {
+  let raw: unknown = value;
+  if (!Array.isArray(raw) && raw && typeof raw === "object") {
+    const record = raw as Record<string, unknown>;
+    raw = Array.isArray(record.entries) ? record.entries : Array.isArray(record.glossary) ? record.glossary : Object.entries(record).map(([source, target]) => ({ source, target }));
+  }
+  if (!Array.isArray(raw)) throw new Error("JSON 必须是术语数组，或包含 entries/glossary 数组");
+  const entries = raw.flatMap((item) => {
+    if (typeof item === "string") return parseGlossary(item);
+    if (item && typeof item === "object") {
+      const record = item as Record<string, unknown>;
+      if (typeof record.source === "string" && typeof record.target === "string") return [{ source: record.source, target: record.target }];
+    }
+    return [];
+  });
+  const deduplicated = new Map<string, GlossaryEntry>();
+  validGlossaryEntries(entries).forEach((entry) => deduplicated.set(entry.source, entry));
+  return Array.from(deduplicated.values()).slice(0, 200);
+};
+
 function Icon({ name, size = 18 }: { name: string; size?: number }) {
   const common = { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
   const paths: Record<string, ReactNode> = {
@@ -124,6 +167,7 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
     trash: <><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" /></>,
     link: <><path d="M10 13a5 5 0 0 0 7.1.1l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1" /><path d="M14 11a5 5 0 0 0-7.1-.1l-2 2a5 5 0 0 0 7.1 7.1l1.1-1.1" /></>,
     shield: <path d="M12 3 20 6v5c0 5-3.4 8.5-8 10-4.6-1.5-8-5-8-10V6l8-3Z" />,
+    book: <><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21.5Z" /><path d="M4 5.5v16M8 7h8M8 11h8" /></>,
     chevron: <path d="m9 18 6-6-6-6" />,
   };
   return <svg {...common}>{paths[name] ?? paths.grid}</svg>;
@@ -396,10 +440,12 @@ function App() {
     setToast("OBS 地址已复制");
   };
 
-  const saveSettings = async () => {
+  const saveSettings = async (override?: AppConfig) => {
+    const nextConfig = override || config;
     setIsSaving(true);
     try {
-      if (desktopRuntime()) await saveConfig(config);
+      const saved = desktopRuntime() ? await saveConfig(nextConfig) : nextConfig;
+      setConfig(cloneConfig(saved));
       addLog("配置已保存到本机", "success");
       setToast("配置已保存");
     } catch (error) {
@@ -531,6 +577,7 @@ function App() {
           <NavItem icon="grid" label="实时控制台" active={page === "dashboard"} onClick={() => setPage("dashboard")} />
           <NavItem icon="download" label="语音模型" active={page === "models"} onClick={() => setPage("models")} badge={models.filter((model) => model.status === "installed").length || undefined} />
           <NavItem icon="palette" label="字幕样式" active={page === "style"} onClick={() => setPage("style")} />
+          <NavItem icon="book" label="术语表" active={page === "glossary"} onClick={() => setPage("glossary")} badge={config.glossary.filter((entry) => entry.source && entry.target).length || undefined} />
         </div>
         <div className="nav-group settings-nav">
           <div className="nav-label">系统</div>
@@ -539,7 +586,7 @@ function App() {
 
         <div className="sidebar-bottom">
           <div className="local-card"><div className="local-icon"><Icon name="shield" size={16} /></div><div><strong>本地优先</strong><span>识别在此设备运行</span></div><span className="green-dot" /></div>
-          <div className="version">声译 v0.1.17 <span>·</span> Windows 版</div>
+          <div className="version">声译 v0.1.18 <span>·</span> Windows 版</div>
         </div>
       </aside>
 
@@ -557,7 +604,8 @@ function App() {
           {page === "dashboard" && <DashboardPage {...{ config, devices, server, audioLevel, recognitionDiagnostic, recognitionStatus, currentSubtitle, logs, tokenUsage, currentModel, onStart: handleStart, onPause: handlePause, onStop: handleStop, onDeviceChange: handleDeviceChange, onCopyUrl: copyOverlayUrl, onOpenPage: setPage, onTestTranslation: handleTestTranslation }} />}
           {page === "models" && <><HardwareHint hardware={hardware} /><ModelsPage models={models} progress={modelProgress} onDownload={handleDownload} onPause={handlePauseDownload} onVerify={handleVerify} onDelete={handleDelete} onSelect={handleSelectModel} /></>}
           {page === "style" && <StylePage style={config.style} currentSubtitle={currentSubtitle} onChange={updateStyle} onSave={handleSaveStyle} onReset={handleResetStyle} />}
-          {page === "settings" && <SettingsPageV2 config={config} server={server} isSaving={isSaving} onChange={updateConfig} onSave={saveSettings} onTest={handleTestTranslation} />}
+          {page === "glossary" && <GlossaryPage entries={config.glossary} isSaving={isSaving} onChange={(glossary) => updateConfig({ glossary })} onSave={(glossary) => void saveSettings({ ...config, glossary })} />}
+          {page === "settings" && <SettingsPageV2 config={config} devices={devices} server={server} isSaving={isSaving} onChange={updateConfig} onSave={() => void saveSettings()} onTest={handleTestTranslation} />}
         </div>
       </main>
       {toast && <Toast message={toast} onClose={() => setToast(null)} />}
@@ -568,11 +616,11 @@ function App() {
 type UnlistenLike = () => void;
 
 function pageLabel(page: Page) {
-  return { dashboard: "LIVE WORKSPACE", models: "LOCAL ENGINE", style: "VISUAL SYSTEM", settings: "PREFERENCES" }[page];
+  return { dashboard: "LIVE WORKSPACE", models: "LOCAL ENGINE", style: "VISUAL SYSTEM", glossary: "LOCAL TERMS", settings: "PREFERENCES" }[page];
 }
 
 function pageTitle(page: Page) {
-  return { dashboard: "实时控制台", models: "语音模型", style: "字幕样式", settings: "连接与设置" }[page];
+  return { dashboard: "实时控制台", models: "语音模型", style: "字幕样式", glossary: "术语表", settings: "连接与设置" }[page];
 }
 
 function NavItem({ icon, label, active, onClick, badge }: { icon: string; label: string; active: boolean; onClick: () => void; badge?: number }) {
@@ -659,6 +707,41 @@ function ModelsPage({ models, progress, onDownload, onPause, onVerify, onDelete,
   return <div className="subpage"><div className="subpage-intro"><div><p className="section-kicker">LOCAL ASR ENGINE</p><h2>选择你的识别引擎</h2><p>模型保存到程序目录的 models 文件夹，下载后无需联网即可完成语音识别。新安装建议从 2026 Qwen3-ASR 0.6B 开始。</p></div><div className="privacy-note"><Icon name="shield" size={18} /><span><b>本地推理</b><small>音频不会离开你的设备</small></span></div></div><div className="model-list">{models.map((model) => { const event = progress[model.id]; const isDownloading = model.status === "downloading" || event?.status === "downloading"; const progressLabel = event?.total ? `${Math.round((event.progress ?? model.progress) * 100)}%` : event?.downloaded ? `${formatBytes(event.downloaded)} · 下载中` : "连接中…"; return <div className={`model-card ${model.active ? "selected" : ""}`} key={model.id}><div className="model-icon">{model.id.startsWith("qwen") ? "Q" : model.id === "large-v3-turbo" ? "L" : model.id === "medium" ? "M" : "S"}</div><div className="model-main"><div className="model-title-row"><h3>{model.name}</h3>{model.recommended && <span className="recommend-tag">推荐</span>}{model.active && <span className="active-tag"><Icon name="check" size={11} />当前使用</span>}</div><p>{model.description}</p><div className="model-specs"><span><b>{model.size}</b> 下载大小</span><span><b>{model.accuracy}</b>准确率</span><span><b>{model.speed}</b>速度</span></div>{isDownloading && <div className="download-progress"><div className="progress-label"><span>{event?.message || event?.file || "正在下载…"}</span><b>{progressLabel}</b></div><div className={`progress-track ${event?.total ? "" : "indeterminate"}`}><i style={event?.total ? { width: `${(event.progress ?? model.progress) * 100}%` } : undefined} /></div></div>}{event?.status === "error" && <div className="download-error">{event.message || "下载失败，可重试"}</div>}</div><div className="model-actions">{model.status === "installed" ? <><button className="outline-button" onClick={() => onVerify(model)}><Icon name="check" size={14} />校验</button><button className="ghost-danger" onClick={() => onDelete(model)} title="删除模型"><Icon name="trash" size={15} /></button>{!model.active && <button className="dark-button" onClick={() => onSelect(model)}>使用此模型</button>}</> : isDownloading ? <button className="outline-button" onClick={() => onPause(model)}><Icon name="pause" size={13} />暂停</button> : <button className="dark-button" onClick={() => onDownload(model)}><Icon name="download" size={14} />下载模型</button>}</div></div>; })}</div><div className="model-footer"><Icon name="link" size={14} />2026 Qwen3-ASR 模型来自 Hugging Face / ModelScope；旧 Whisper 模型仅为兼容保留。下载后会记录 SHA-256 校验值。<button onClick={() => window.open("https://huggingface.co/Qwen", "_blank")}>查看来源 <Icon name="external" size={13} /></button></div></div>;
 }
 
+function GlossaryPage({ entries, isSaving, onChange, onSave }: { entries: GlossaryEntry[]; isSaving: boolean; onChange: (entries: GlossaryEntry[]) => void; onSave: (entries: GlossaryEntry[]) => void }) {
+  const [query, setQuery] = useState("");
+  const [message, setMessage] = useState("术语只保存在本机配置中");
+  const fileInput = useRef<HTMLInputElement>(null);
+  const visibleEntries = entries
+    .map((entry, index) => ({ entry, index }))
+    .filter(({ entry }) => !query.trim() || `${entry.source} ${entry.target}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
+  const updateEntry = (index: number, patch: Partial<GlossaryEntry>) => onChange(entries.map((entry, entryIndex) => entryIndex === index ? { ...entry, ...patch } : entry));
+  const addEntry = () => onChange([...entries, { source: "", target: "" }]);
+  const removeEntry = (index: number) => onChange(entries.filter((_, entryIndex) => entryIndex !== index));
+  const exportJson = () => {
+    const payload = JSON.stringify({ version: 1, entries: validGlossaryEntries(entries) }, null, 2);
+    const url = URL.createObjectURL(new Blob([payload], { type: "application/json;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `voice-caption-glossary-${new Date().toISOString().slice(0, 10)}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    setMessage("术语表 JSON 已导出");
+  };
+  const importJson = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      const imported = glossaryEntriesFromJson(JSON.parse(await file.text()));
+      onChange(imported);
+      setMessage(`已导入 ${imported.length} 条术语，请点击“保存术语表”`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "JSON 术语表格式错误");
+    }
+  };
+  return <div className="subpage glossary-page"><div className="subpage-intro"><div><p className="section-kicker">LOCAL TERMS</p><h2>术语表管理</h2><p>在本地维护固定译法。完整术语表不会发送给 AI，只有命中的术语会参与当前句子处理。</p></div><div className="glossary-actions"><button className="outline-button" onClick={() => fileInput.current?.click()}>导入 JSON</button><input ref={fileInput} className="hidden-file-input" type="file" accept="application/json,.json" onChange={(event) => void importJson(event)} /><button className="outline-button" onClick={exportJson}>导出 JSON</button><button className="dark-button" onClick={() => onSave(entries)} disabled={isSaving}><Icon name="check" size={14} />{isSaving ? "保存中…" : "保存术语表"}</button></div></div><section className="panel glossary-panel"><div className="glossary-toolbar"><div><b>{validGlossaryEntries(entries).length}</b><span>条有效术语</span></div><label className="glossary-search"><Icon name="grid" size={14} /><input value={query} placeholder="搜索中文或英文术语" onChange={(event) => setQuery(event.target.value)} /></label><button className="dark-button" onClick={addEntry}>+ 新增术语</button></div><div className="glossary-hint"><Icon name="shield" size={14} /><span>格式示例：<code>英伟达广播=NVIDIA Broadcast</code>。单独识别到完整术语时可本地直出，不消耗 API Token。</span></div><div className="glossary-table"><div className="glossary-row glossary-head"><span>中文 / 原文</span><span>固定译法</span><span>操作</span></div>{visibleEntries.length ? visibleEntries.map(({ entry, index }) => <div className="glossary-row" key={`${index}-${entry.source}`}><input value={entry.source} placeholder="例如：英伟达广播" onChange={(event) => updateEntry(index, { source: event.target.value })} /><input value={entry.target} placeholder="例如：NVIDIA Broadcast" onChange={(event) => updateEntry(index, { target: event.target.value })} /><button className="ghost-danger" onClick={() => removeEntry(index)} title="删除术语"><Icon name="trash" size={15} /></button></div>) : <div className="glossary-empty">没有匹配的术语，点击“新增术语”开始维护。</div>}</div><div className="glossary-footer"><span>{message}</span><small>最多保存 200 条；保存时会自动去除空行并限制单条长度。</small></div></section></div>;
+}
+
 function StylePage({ style, currentSubtitle, onChange, onSave, onReset }: { style: SubtitleStyle; currentSubtitle: SubtitleEvent | null; onChange: (patch: Partial<SubtitleStyle>) => void; onSave: () => void; onReset: () => void }) {
   const updateText = (language: "chinese" | "english", patch: Partial<SubtitleStyle["chinese"]>) => onChange({ [language]: { ...style[language], ...patch } });
   return <div className="subpage style-page"><div className="subpage-intro"><div><p className="section-kicker">VISUAL SYSTEM</p><h2>让字幕成为画面的一部分</h2><p>调整会实时同步到本机 OBS 字幕源，保存后重启软件也会保留。</p></div><div className="style-actions"><button className="outline-button" onClick={onReset}>恢复默认</button><button className="dark-button" onClick={onSave}><Icon name="check" size={14} />保存样式</button></div></div><div className="style-layout"><section className="panel style-controls"><PanelHeading eyebrow="TYPOGRAPHY" title="文字样式" /><div className="style-section"><div className="style-section-title"><span className="language-dot cn" />中文</div><div className="two-fields"><label>字体<select value={style.chinese.fontFamily} onChange={(e) => updateText("chinese", { fontFamily: e.target.value })}><option value="Microsoft YaHei, PingFang SC, sans-serif">微软雅黑</option><option value="SimSun, serif">宋体</option><option value="Arial, sans-serif">Arial</option></select></label><label>字号 <Range value={style.chinese.fontSize} min={18} max={64} suffix="px" onChange={(value) => updateText("chinese", { fontSize: value })} /></label></div><div className="two-fields"><label>颜色<div className="color-input"><input type="color" value={style.chinese.color} onChange={(e) => updateText("chinese", { color: e.target.value })} /><span>{style.chinese.color}</span></div></label><label>不透明度<Range value={style.chinese.opacity * 100} min={20} max={100} suffix="%" onChange={(value) => updateText("chinese", { opacity: value / 100 })} /></label></div></div><div className="style-divider" /><div className="style-section"><div className="style-section-title"><span className="language-dot en" />English</div><div className="two-fields"><label>字体<select value={style.english.fontFamily} onChange={(e) => updateText("english", { fontFamily: e.target.value })}><option value="Segoe UI, Arial, sans-serif">Segoe UI</option><option value="Arial, sans-serif">Arial</option><option value="Georgia, serif">Georgia</option></select></label><label>字号<Range value={style.english.fontSize} min={14} max={48} suffix="px" onChange={(value) => updateText("english", { fontSize: value })} /></label></div><div className="two-fields"><label>颜色<div className="color-input"><input type="color" value={style.english.color} onChange={(e) => updateText("english", { color: e.target.value })} /><span>{style.english.color}</span></div></label><label>不透明度<Range value={style.english.opacity * 100} min={20} max={100} suffix="%" onChange={(value) => updateText("english", { opacity: value / 100 })} /></label></div></div><div className="style-divider" /><PanelHeading eyebrow="LAYOUT" title="布局与效果" /><div className="segmented"><button className={style.layout === "stacked" ? "active" : ""} onClick={() => onChange({ layout: "stacked" })}>上下布局</button><button className={style.layout === "sideBySide" ? "active" : ""} onClick={() => onChange({ layout: "sideBySide" })}>左右布局</button></div><div className="two-fields"><label>对齐<select value={style.alignment} onChange={(e) => onChange({ alignment: e.target.value as SubtitleStyle["alignment"] })}><option value="left">左对齐</option><option value="center">居中</option><option value="right">右对齐</option></select></label><label>位置<select value={style.position} onChange={(e) => onChange({ position: e.target.value as SubtitleStyle["position"] })}><option value="top">顶部</option><option value="center">居中</option><option value="bottom">底部</option></select></label></div><div className="two-fields"><label>背景颜色<div className="color-input"><input type="color" value={style.backgroundColor} onChange={(e) => onChange({ backgroundColor: e.target.value })} /><span>{style.backgroundColor}</span></div></label><label>背景透明度<Range value={style.backgroundOpacity * 100} min={0} max={100} suffix="%" onChange={(value) => onChange({ backgroundOpacity: value / 100 })} /></label></div><label className="toggle-row"><span><b>显示临时字幕</b><small>说话过程中显示未确认文本</small></span><button className={`toggle ${style.showTemporary ? "on" : ""}`} onClick={() => onChange({ showTemporary: !style.showTemporary })}><i /></button></label><label className="toggle-row"><span><b>显示最终字幕</b><small>停顿后保留已确认文本</small></span><button className={`toggle ${style.showFinal ? "on" : ""}`} onClick={() => onChange({ showFinal: !style.showFinal })}><i /></button></label></section><section className="style-preview-wrap"><div className="preview-label"><span>LIVE PREVIEW</span><small>OBS 画布比例 16:9</small></div><div className="style-preview" style={{ background: "linear-gradient(135deg, #182536, #0d1725 55%, #1a2933)" }}><div className="preview-watermark">PREVIEW</div><div className={`preview-caption ${style.position}`} style={{ textAlign: style.alignment, maxWidth: style.maxWidth, backgroundColor: hexToRgba(style.backgroundColor, style.backgroundOpacity), lineHeight: style.lineSpacing }}><div className="preview-cn" style={{ fontFamily: style.chinese.fontFamily, fontSize: style.chinese.fontSize, color: style.chinese.color, opacity: style.chinese.opacity, textShadow: `${style.outlineWidth}px ${style.outlineWidth}px 0 ${style.outlineColor}, 0 3px 12px ${style.shadow ? "#000b" : "transparent"}` }}>{currentSubtitle?.chinese || "欢迎使用声译实时字幕"}</div><div className="preview-en" style={{ fontFamily: style.english.fontFamily, fontSize: style.english.fontSize, color: style.english.color, opacity: style.english.opacity }}>{currentSubtitle?.english || "Welcome to live caption studio"}</div></div><div className="preview-controls"><span>中英双语</span><span><i />实时</span></div></div><div className="preview-note"><Icon name="check" size={15} /><span>样式会通过 WebSocket 自动推送到 OBS，无需刷新浏览器源。</span></div></section></div></div>;
@@ -667,7 +750,30 @@ function StylePage({ style, currentSubtitle, onChange, onSave, onReset }: { styl
 function Range({ value, min, max, suffix, onChange }: { value: number; min: number; max: number; suffix: string; onChange: (value: number) => void }) { return <div className="range-wrap"><input type="range" min={min} max={max} value={value} onChange={(e) => onChange(Number(e.target.value))} /><output>{Math.round(value)}{suffix}</output></div>; }
 function hexToRgba(hex: string, alpha: number) { const clean = hex.replace("#", ""); const value = Number.parseInt(clean.length === 3 ? clean.split("").map((c) => c + c).join("") : clean, 16); return `rgba(${(value >> 16) & 255}, ${(value >> 8) & 255}, ${value & 255}, ${alpha})`; }
 
-function SettingsPageV2({ config, server, isSaving, onChange, onSave, onTest }: { config: AppConfig; server: ServerStatus; isSaving: boolean; onChange: (patch: Partial<AppConfig>) => void; onSave: () => void; onTest: () => void }) {
+function SettingsPageV2({ config, devices, server, isSaving, onChange, onSave, onTest }: { config: AppConfig; devices: AudioDevice[]; server: ServerStatus; isSaving: boolean; onChange: (patch: Partial<AppConfig>) => void; onSave: () => void; onTest: () => void }) {
+  const fallbackDevice = config.selectedDevice || devices.find((device) => device.isDefault)?.name || devices[0]?.name || "";
+  return <><SettingsConnectionPage config={config} server={server} isSaving={isSaving} onChange={onChange} onSave={onSave} onTest={onTest} /><DeviceNoisePanel config={config} devices={devices} fallbackDevice={fallbackDevice} isSaving={isSaving} onChange={onChange} onSave={onSave} /></>;
+}
+
+function DeviceNoisePanel({ config, devices, fallbackDevice, isSaving, onChange, onSave }: { config: AppConfig; devices: AudioDevice[]; fallbackDevice: string; isSaving: boolean; onChange: (patch: Partial<AppConfig>) => void; onSave: () => void }) {
+  const [activeDevice, setActiveDevice] = useState(fallbackDevice);
+  useEffect(() => {
+    if (!activeDevice && fallbackDevice) setActiveDevice(fallbackDevice);
+  }, [activeDevice, fallbackDevice]);
+  const profile = cloneNoiseProfile(activeDevice ? config.noiseProfiles?.[activeDevice] : undefined);
+  const updateProfile = (patch: Partial<NoiseProfile>) => {
+    if (!activeDevice) return;
+    onChange({ noiseProfiles: { ...(config.noiseProfiles || {}), [activeDevice]: { ...profile, ...patch } } });
+  };
+  const updateNumber = (field: "noiseFloor" | "speechThreshold" | "silenceThreshold" | "silenceMs", raw: string) => {
+    const value = Number(raw);
+    if (Number.isFinite(value)) updateProfile({ [field]: value });
+  };
+  const applyMaonoPreset = () => updateProfile({ enabled: true, autoCalibrate: false, useVad: false, noiseFloor: 0.02, speechThreshold: 0.035, silenceThreshold: 0.022, silenceMs: 550 });
+  return <div className="subpage noise-settings-page"><div className="subpage-intro"><div><p className="section-kicker">MICROPHONE PROFILE</p><h2>设备噪声与断句</h2><p>不同麦克风的底噪不同。配置会按设备名称保存，识别启动时只对当前设备生效。</p></div><button className="dark-button save-settings" onClick={onSave} disabled={isSaving}>{isSaving ? "保存中…" : "保存设备配置"}</button></div><section className="panel noise-profile-panel"><PanelHeading eyebrow="NOISE GATE" title="选择设备并设置噪声范围" /><div className="noise-profile-body"><label className="form-label">配置设备<select value={activeDevice} onChange={(event) => setActiveDevice(event.target.value)}><option value="">请先选择设备</option>{devices.map((device) => <option key={device.id} value={device.name}>{device.name}{device.isDefault ? " · 默认" : ""}</option>)}</select></label><div className="noise-profile-summary"><Icon name="mic" size={16} /><span>{activeDevice ? `当前配置：${activeDevice}` : "尚未选择麦克风"}</span><button className="outline-button" onClick={applyMaonoPreset} disabled={!activeDevice}>套用 Maono Fairy 原始 Mic 预设</button></div><div className="noise-toggle-grid"><label className="toggle-row"><span><b>启用设备专属配置</b><small>关闭后使用通用自动策略</small></span><button className={`toggle ${profile.enabled ? "on" : ""}`} onClick={() => updateProfile({ enabled: !profile.enabled })} disabled={!activeDevice}><i /></button></label><label className="toggle-row"><span><b>启动时自动校准底噪</b><small>建议先打开，静音 1.2 秒后测量 RMS</small></span><button className={`toggle ${profile.autoCalibrate ? "on" : ""}`} onClick={() => updateProfile({ autoCalibrate: !profile.autoCalibrate })} disabled={!activeDevice}><i /></button></label><label className="toggle-row"><span><b>使用 WebRTC VAD</b><small>Maono 原始 Mic 底噪过高时建议关闭</small></span><button className={`toggle ${profile.useVad ? "on" : ""}`} onClick={() => updateProfile({ useVad: !profile.useVad })} disabled={!activeDevice}><i /></button></label></div><div className="two-fields noise-fields"><label>底噪 RMS<input type="number" min="0" max="0.9" step="0.001" value={profile.noiseFloor} onChange={(event) => updateNumber("noiseFloor", event.target.value)} disabled={!activeDevice} /><small>0 表示自动测量；Maono 可先填 0.020</small></label><label>语音开始阈值<input type="number" min="0" max="0.9" step="0.001" value={profile.speechThreshold} onChange={(event) => updateNumber("speechThreshold", event.target.value)} disabled={!activeDevice} /><small>底噪高于此值才开始一句话</small></label></div><div className="two-fields noise-fields"><label>语音结束阈值<input type="number" min="0" max="0.9" step="0.001" value={profile.silenceThreshold} onChange={(event) => updateNumber("silenceThreshold", event.target.value)} disabled={!activeDevice} /><small>低于此值累计静音；0 使用底噪推算</small></label><label>静音结束时间（毫秒）<input type="number" min="250" max="3000" step="50" value={profile.silenceMs} onChange={(event) => updateNumber("silenceMs", event.target.value)} disabled={!activeDevice} /><small>建议 500–800；越小越快切句</small></label></div><div className="settings-note"><Icon name="check" size={15} />推荐 Maono 原始 Mic 先使用预设；如果仍被底噪触发，提高“语音开始阈值”，如果说话被截断则降低它。</div></div></section></div>;
+}
+
+function SettingsConnectionPage({ config, server, isSaving, onChange, onSave, onTest }: { config: AppConfig; server: ServerStatus; isSaving: boolean; onChange: (patch: Partial<AppConfig>) => void; onSave: () => void; onTest: () => void }) {
   const overlayUrl = server.overlayUrl || `http://${server.host || "127.0.0.1"}:${config.serverPort}/overlay`;
   const editorUrl = server.editorUrl || `http://${server.host || "127.0.0.1"}:${config.serverPort}/editor`;
   const style = config.style;

@@ -289,6 +289,12 @@ def main() -> int:
     parser.add_argument("--compute-type", default="auto")
     parser.add_argument("--language", default="auto")
     parser.add_argument("--device-name", default=None)
+    parser.add_argument("--noise-floor", type=float, default=0.0)
+    parser.add_argument("--speech-threshold", type=float, default=0.0)
+    parser.add_argument("--silence-threshold", type=float, default=0.0)
+    parser.add_argument("--silence-ms", type=int, default=700)
+    parser.add_argument("--no-auto-calibrate", action="store_true")
+    parser.add_argument("--disable-vad", action="store_true")
     parser.add_argument(
         "--stdin-audio",
         action="store_true",
@@ -591,23 +597,27 @@ def main() -> int:
     peak_rms = 0.0
     last_no_audio_status = 0.0
     sample_rate = 16_000
-    # WebRTC VAD is the primary gate. On machines where the optional package
-    # is unavailable, calibrate the first quiet 1.2 seconds and use a moving
-    # noise floor instead of treating every non-zero microphone sample as
-    # speech. This is what prevents a noisy physical microphone from keeping
-    # one utterance open until the hard safety limit.
-    voice_detector = create_voice_detector()
+    # WebRTC VAD is combined with an RMS gate. The RMS gate is important for
+    # physical microphones such as Maono Fairy whose steady analogue noise can
+    # otherwise be classified as voiced by VAD. A per-device profile can turn
+    # VAD off completely and provide explicit thresholds.
+    voice_detector = None if args.disable_vad else create_voice_detector()
     if voice_detector is None:
-        emit_status("microphone", "未启用 WebRTC VAD，正在校准自适应噪声底…")
+        emit_status("microphone", "未启用 WebRTC VAD，将使用设备噪声阈值断句")
     else:
-        emit_status("microphone", "已启用 WebRTC VAD，底噪不会单独触发断句")
-    noise_floor = 0.003
+        emit_status("microphone", "已启用 WebRTC VAD，并叠加设备噪声阈值断句")
+    configured_noise_floor = max(0.0, min(0.9, args.noise_floor))
+    configured_speech_threshold = max(0.0, min(0.9, args.speech_threshold))
+    configured_silence_threshold = max(0.0, min(0.9, args.silence_threshold))
+    noise_floor = configured_noise_floor or 0.003
+    auto_calibrate = not args.no_auto_calibrate
     calibration_target_samples = int(sample_rate * 1.2)
     calibration_samples = 0
     calibration_levels: list[float] = []
-    calibration_complete = voice_detector is not None
+    calibration_complete = not auto_calibrate
     min_utterance_samples = int(sample_rate * 0.5)
-    silence_to_finalize_samples = int(sample_rate * 0.7)
+    silence_ms = max(250, min(3_000, int(args.silence_ms)))
+    silence_to_finalize_samples = int(sample_rate * silence_ms / 1000)
     max_utterance_samples = int(sample_rate * 10.0)
 
     try:
@@ -623,42 +633,43 @@ def main() -> int:
             chunk = resample_audio(input_chunk, capture_rate, sample_rate)
             rms = float(np.sqrt(np.mean(np.square(chunk)))) if len(chunk) else 0.0
             vad_ratio = voice_activity_ratio(voice_detector, chunk, sample_rate)
-            if vad_ratio is not None:
-                speech_active = vad_ratio >= 0.20
-                if not had_speech and not speech_active:
-                    noise_floor = (noise_floor * 0.98) + (max(rms, 0.0005) * 0.02)
-            else:
-                if not calibration_complete:
-                    # A quiet startup period is background calibration. A
-                    # clearly loud first block is treated as speech so a user
-                    # does not lose the first sentence after pressing Start.
-                    if rms <= 0.02:
-                        calibration_levels.append(rms)
-                        calibration_samples += len(chunk)
-                        pre_roll.append(chunk)
-                        if calibration_samples < calibration_target_samples:
-                            continue
-                        ordered_levels = sorted(calibration_levels)
-                        noise_floor = max(
-                            0.0005,
-                            ordered_levels[max(0, len(ordered_levels) // 3)],
-                        )
-                        calibration_complete = True
-                        pre_roll.clear()
-                        emit_status(
-                            "microphone",
-                            f"噪声底校准完成（RMS {noise_floor:.4f}），将按自然停顿断句",
-                        )
+            if not calibration_complete:
+                # Use VAD only to decide whether an initial block is clearly
+                # voiced; the actual floor is always measured from RMS. This
+                # makes auto calibration useful for both quiet and noisy mics.
+                calibration_is_quiet = rms <= 0.02
+                if vad_ratio is not None:
+                    calibration_is_quiet = vad_ratio < 0.20
+                if calibration_is_quiet:
+                    calibration_levels.append(rms)
+                    calibration_samples += len(chunk)
+                    pre_roll.append(chunk)
+                    if calibration_samples < calibration_target_samples:
                         continue
-                    noise_floor = max(
-                        0.0005,
-                        min(calibration_levels, default=0.003),
-                    )
+                    ordered_levels = sorted(calibration_levels)
+                    measured_floor = ordered_levels[max(0, len(ordered_levels) // 3)]
+                    noise_floor = max(configured_noise_floor, measured_floor, 0.0005)
                     calibration_complete = True
-                    emit_status("microphone", "检测到语音，跳过启动噪声校准")
-                on_threshold = max(0.006, noise_floor * 1.6)
-                off_threshold = max(0.003, noise_floor * 1.18)
-                speech_active = rms > (off_threshold if had_speech else on_threshold)
+                    pre_roll.clear()
+                    emit_status(
+                        "microphone",
+                        f"噪声底校准完成（RMS {noise_floor:.4f}），将按设备阈值断句",
+                    )
+                    continue
+                noise_floor = max(
+                    configured_noise_floor,
+                    min(calibration_levels, default=0.003),
+                )
+                calibration_complete = True
+                emit_status("microphone", "检测到语音，跳过启动噪声校准")
+
+            on_threshold = configured_speech_threshold or max(0.006, noise_floor * 1.6)
+            off_threshold = configured_silence_threshold or max(0.003, noise_floor * 1.18)
+            energy_active = rms > (off_threshold if had_speech else on_threshold)
+            if vad_ratio is not None:
+                speech_active = energy_active and vad_ratio >= 0.10
+            else:
+                speech_active = energy_active
             if not had_speech:
                 if not speech_active:
                     pre_roll.append(chunk)

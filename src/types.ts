@@ -1,4 +1,4 @@
-export type Page = "dashboard" | "models" | "style" | "settings";
+export type Page = "dashboard" | "models" | "style" | "glossary" | "settings";
 
 export type RecognitionStatus = "idle" | "running" | "paused" | "error";
 
@@ -48,12 +48,23 @@ export interface GlossaryEntry {
   target: string;
 }
 
+export interface NoiseProfile {
+  enabled: boolean;
+  autoCalibrate: boolean;
+  useVad: boolean;
+  noiseFloor: number;
+  speechThreshold: number;
+  silenceThreshold: number;
+  silenceMs: number;
+}
+
 export interface AppConfig {
   selectedDevice: string | null;
   activeModel: string;
   deepseek: DeepSeekConfig;
   recognitionLanguage: "auto" | "Chinese" | "Chinese,English";
   glossary: GlossaryEntry[];
+  noiseProfiles: Record<string, NoiseProfile>;
   style: SubtitleStyle;
   serverPort: number;
 }
@@ -182,6 +193,7 @@ export const emptyConfig: AppConfig = {
   },
   recognitionLanguage: "Chinese",
   glossary: [],
+  noiseProfiles: {},
   style: defaultStyle,
   serverPort: 39071,
 };

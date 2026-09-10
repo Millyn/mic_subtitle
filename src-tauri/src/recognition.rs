@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::audio;
 use crate::models::model_path;
-use crate::state::{AppState, SubtitleEvent};
+use crate::state::{AppState, NoiseProfile, SubtitleEvent};
 use crate::translation::publish_with_translation;
 
 #[derive(Debug, Deserialize)]
@@ -56,12 +56,15 @@ pub async fn start(
         ));
     }
     let session_token_usage = state.reset_token_session().await;
+    let profile_device_name = device_name.as_deref().or(config.selected_device.as_deref());
+    let noise_profile = profile_device_name.and_then(|name| config.noise_profiles.get(name));
 
     let mut command = worker_command(
         &app,
         &path,
         device_name.as_deref(),
         config.recognition_language.as_str(),
+        noise_profile,
     )?;
     let diagnostics_log = open_diagnostics_log();
     write_diagnostic(
@@ -352,6 +355,7 @@ fn worker_command(
     model_path: &PathBuf,
     device_name: Option<&str>,
     language: &str,
+    noise_profile: Option<&NoiseProfile>,
 ) -> Result<Command, String> {
     let mut command = if let Ok(path) = std::env::var("WHISPER_WORKER_PATH") {
         Command::new(path)
@@ -379,6 +383,23 @@ fn worker_command(
         .arg("--stdin-audio");
     if let Some(device) = device_name.filter(|name| !name.trim().is_empty()) {
         command.arg("--device-name").arg(device);
+    }
+    if let Some(profile) = noise_profile.filter(|profile| profile.enabled) {
+        command
+            .arg("--noise-floor")
+            .arg(profile.noise_floor.to_string())
+            .arg("--speech-threshold")
+            .arg(profile.speech_threshold.to_string())
+            .arg("--silence-threshold")
+            .arg(profile.silence_threshold.to_string())
+            .arg("--silence-ms")
+            .arg(profile.silence_ms.to_string());
+        if !profile.auto_calibrate {
+            command.arg("--no-auto-calibrate");
+        }
+        if !profile.use_vad {
+            command.arg("--disable-vad");
+        }
     }
     Ok(command)
 }

@@ -29,6 +29,7 @@ async fn save_config(state: State<'_, AppState>, config: AppConfig) -> Result<Ap
     current.deepseek = next.deepseek;
     current.recognition_language = next.recognition_language;
     current.glossary = next.glossary;
+    current.noise_profiles = next.noise_profiles;
     current.style = next.style;
     current.server_port = next_server_port;
     if !next.models.is_empty() {
