@@ -10,7 +10,7 @@ mod translation;
 
 use models::ModelView;
 use state::{normalize_server_port, AppConfig, AppState, SubtitleEvent, SubtitleStyle};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[tauri::command]
 async fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
@@ -25,7 +25,9 @@ async fn save_config(state: State<'_, AppState>, config: AppConfig) -> Result<Ap
     current.selected_device = config.selected_device;
     current.active_model = config.active_model;
     current.deepseek = config.deepseek;
-    current.style = config.style;
+    let mut style = config.style;
+    style.normalize();
+    current.style = style;
     current.server_port = next_server_port;
     if !config.models.is_empty() {
         current.models = config.models;
@@ -133,6 +135,8 @@ async fn save_style(
     state: State<'_, AppState>,
     style: SubtitleStyle,
 ) -> Result<SubtitleStyle, String> {
+    let mut style = style;
+    style.normalize();
     {
         let mut config = state.config.write().await;
         config.style = style.clone();
@@ -155,15 +159,49 @@ async fn reset_style(state: State<'_, AppState>) -> Result<SubtitleStyle, String
 }
 
 #[tauri::command]
-async fn translate_text(state: State<'_, AppState>, text: String) -> Result<String, String> {
+async fn translate_text(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    text: String,
+) -> Result<String, String> {
     let config = state.config.read().await.clone();
-    translation::translate(&config, &text).await
+    let result = translation::translate_with_usage(&config, &text).await?;
+    let usage = state
+        .record_translation_tokens(
+            result.prompt_tokens,
+            result.completion_tokens,
+            result.total_tokens,
+            result.usage_estimated,
+        )
+        .await;
+    let _ = app.emit("token-usage", &usage);
+    Ok(result.text)
 }
 
 #[tauri::command]
-async fn publish_subtitle(state: State<'_, AppState>, event: SubtitleEvent) -> Result<(), String> {
-    let _ = translation::publish_with_translation(&state, event).await;
+async fn publish_subtitle(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    event: SubtitleEvent,
+) -> Result<(), String> {
+    let (_, result) = translation::publish_with_translation(&state, event).await;
+    if let Some(result) = result {
+        let usage = state
+            .record_translation_tokens(
+                result.prompt_tokens,
+                result.completion_tokens,
+                result.total_tokens,
+                result.usage_estimated,
+            )
+            .await;
+        let _ = app.emit("token-usage", &usage);
+    }
     Ok(())
+}
+
+#[tauri::command]
+async fn get_token_usage(state: State<'_, AppState>) -> Result<state::TokenUsage, String> {
+    Ok(state.get_token_usage().await)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -236,7 +274,8 @@ pub fn run() {
             save_style,
             reset_style,
             translate_text,
-            publish_subtitle
+            publish_subtitle,
+            get_token_usage
         ])
         .run(tauri::generate_context!())
         .expect("error while running voice caption studio");

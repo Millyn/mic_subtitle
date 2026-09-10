@@ -21,6 +21,10 @@ export interface SubtitleStyle {
   layout: "stacked" | "sideBySide";
   alignment: "left" | "center" | "right";
   position: "top" | "center" | "bottom";
+  canvasWidth: number;
+  canvasHeight: number;
+  subtitleX: number;
+  subtitleY: number;
   maxWidth: number;
   lineSpacing: number;
   showTemporary: boolean;
@@ -72,6 +76,23 @@ export interface SubtitleEvent {
   chinese: string;
   english?: string;
   translationError?: string;
+}
+
+export interface TokenCounter {
+  asrUtterances: number;
+  asrTokens: number;
+  asrEstimated: boolean;
+  translationRequests: number;
+  translationPromptTokens: number;
+  translationCompletionTokens: number;
+  translationTotalTokens: number;
+  translationEstimated: boolean;
+  totalTokens: number;
+}
+
+export interface TokenUsage {
+  session: TokenCounter;
+  allTime: TokenCounter;
 }
 
 export interface ModelCatalogEntry {
@@ -128,6 +149,10 @@ export const defaultStyle: SubtitleStyle = {
   layout: "stacked",
   alignment: "center",
   position: "bottom",
+  canvasWidth: 1920,
+  canvasHeight: 1080,
+  subtitleX: 960,
+  subtitleY: 900,
   maxWidth: 1100,
   lineSpacing: 1.3,
   showTemporary: true,
@@ -150,4 +175,21 @@ export const emptyConfig: AppConfig = {
   },
   style: defaultStyle,
   serverPort: 39071,
+};
+
+export const emptyTokenCounter: TokenCounter = {
+  asrUtterances: 0,
+  asrTokens: 0,
+  asrEstimated: false,
+  translationRequests: 0,
+  translationPromptTokens: 0,
+  translationCompletionTokens: 0,
+  translationTotalTokens: 0,
+  translationEstimated: false,
+  totalTokens: 0,
+};
+
+export const emptyTokenUsage: TokenUsage = {
+  session: emptyTokenCounter,
+  allTime: emptyTokenCounter,
 };

@@ -23,6 +23,18 @@ struct ChatMessage<'a> {
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
     choices: Vec<ChatChoice>,
+    #[serde(default)]
+    usage: Option<ChatUsage>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ChatUsage {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
+    #[serde(default)]
+    total_tokens: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,6 +45,15 @@ struct ChatChoice {
 #[derive(Debug, Deserialize)]
 struct ChatMessageOwned {
     content: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TranslationResult {
+    pub text: String,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub usage_estimated: bool,
 }
 
 /// Translation is deliberately kept behind this interface so a local model
@@ -60,17 +81,25 @@ impl Translator for DeepSeekTranslator {
         &'a self,
         text: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
-        Box::pin(translate_deepseek(&self.config, text))
+        let config = self.config.clone();
+        Box::pin(async move {
+            translate_with_usage(&config, text)
+                .await
+                .map(|result| result.text)
+        })
     }
 }
 
 pub async fn translate(config: &AppConfig, text: &str) -> Result<String, String> {
-    DeepSeekTranslator::new(config.clone())
-        .translate(text)
+    translate_with_usage(config, text)
         .await
+        .map(|result| result.text)
 }
 
-async fn translate_deepseek(config: &AppConfig, text: &str) -> Result<String, String> {
+pub async fn translate_with_usage(
+    config: &AppConfig,
+    text: &str,
+) -> Result<TranslationResult, String> {
     if !config.deepseek.enabled {
         return Err("翻译功能已禁用".into());
     }
@@ -82,12 +111,13 @@ async fn translate_deepseek(config: &AppConfig, text: &str) -> Result<String, St
         return Err("DeepSeek API 地址必须以 http:// 或 https:// 开头".into());
     }
     let url = format!("{base}/chat/completions");
+    let system_prompt = "你是实时字幕翻译器。将用户提供的中文准确、自然、简洁地翻译成英文。只输出英文翻译，不要解释，不要加引号。";
     let request = ChatRequest {
         model: config.deepseek.model.trim(),
         messages: vec![
             ChatMessage {
                 role: "system",
-                content: "你是实时字幕翻译器。将用户提供的中文准确、自然、简洁地翻译成英文。只输出英文翻译，不要解释，不要加引号。",
+                content: system_prompt,
             },
             ChatMessage {
                 role: "user",
@@ -98,7 +128,7 @@ async fn translate_deepseek(config: &AppConfig, text: &str) -> Result<String, St
         stream: false,
     };
     let client = reqwest::Client::builder()
-        .user_agent("voice-caption-studio/0.1.15")
+        .user_agent("voice-caption-studio/0.1.16")
         .build()
         .map_err(|error| error.to_string())?;
     let response = client
@@ -118,29 +148,84 @@ async fn translate_deepseek(config: &AppConfig, text: &str) -> Result<String, St
     }
     let parsed: ChatResponse =
         serde_json::from_str(&body).map_err(|error| format!("DeepSeek 返回格式异常：{error}"))?;
-    parsed
+    let translated_text = parsed
         .choices
         .first()
         .map(|choice| choice.message.content.trim().to_string())
         .filter(|content| !content.is_empty())
-        .ok_or_else(|| "DeepSeek 没有返回翻译文本".into())
+        .ok_or_else(|| "DeepSeek 没有返回翻译文本".to_string())?;
+    let estimated_prompt = estimate_tokens(system_prompt) + estimate_tokens(text);
+    let estimated_completion = estimate_tokens(&translated_text);
+    let (prompt_tokens, completion_tokens, total_tokens, usage_estimated) =
+        match parsed.usage {
+            Some(usage)
+                if usage.prompt_tokens > 0
+                    || usage.completion_tokens > 0
+                    || usage.total_tokens > 0 => {
+                let total = if usage.total_tokens > 0 {
+                    usage.total_tokens
+                } else {
+                    usage.prompt_tokens.saturating_add(usage.completion_tokens)
+                };
+                (
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    total,
+                    false,
+                )
+            }
+            _ => (
+                estimated_prompt,
+                estimated_completion,
+                estimated_prompt.saturating_add(estimated_completion),
+                true,
+            ),
+        };
+    Ok(TranslationResult {
+        text: translated_text,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        usage_estimated,
+    })
 }
 
-pub async fn publish_with_translation(state: &AppState, mut event: SubtitleEvent) -> SubtitleEvent {
+fn estimate_tokens(text: &str) -> u64 {
+    let count = text.chars().count() as u64;
+    if count == 0 {
+        return 0;
+    }
+    if text.chars().any(|character| !character.is_ascii()) {
+        count
+    } else {
+        ((count + 3) / 4).max(1)
+    }
+}
+
+pub async fn publish_with_translation(
+    state: &AppState,
+    mut event: SubtitleEvent,
+) -> (SubtitleEvent, Option<TranslationResult>) {
     state.publish_subtitle(event.clone()).await;
     if event.kind != "final" || event.chinese.trim().is_empty() {
-        return event;
+        return (event, None);
     }
     let config = state.config.read().await.clone();
     if !config.deepseek.enabled {
-        return event;
+        return (event, None);
     }
-    match translate(&config, &event.chinese).await {
-        Ok(english) => event.english = Some(english),
-        Err(error) => event.translation_error = Some(error),
-    }
+    let result = match translate_with_usage(&config, &event.chinese).await {
+        Ok(result) => {
+            event.english = Some(result.text.clone());
+            Some(result)
+        }
+        Err(error) => {
+            event.translation_error = Some(error);
+            None
+        }
+    };
     state.publish_subtitle(event.clone()).await;
-    event
+    (event, result)
 }
 
 fn truncate(text: &str, max_chars: usize) -> String {

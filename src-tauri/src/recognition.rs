@@ -22,6 +22,10 @@ struct WorkerEvent {
     chinese: Option<String>,
     error: Option<String>,
     level: Option<f32>,
+    #[serde(rename = "asrTokens")]
+    asr_tokens: Option<u64>,
+    #[serde(rename = "asrTokensEstimated")]
+    asr_tokens_estimated: Option<bool>,
 }
 
 pub async fn start(
@@ -51,6 +55,7 @@ pub async fn start(
             "模型「{model_id}」尚未下载或校验，请先在语音模型页面完成安装"
         ));
     }
+    let session_token_usage = state.reset_token_session().await;
 
     let mut command = worker_command(&app, &path, device_name.as_deref())?;
     let diagnostics_log = open_diagnostics_log();
@@ -177,6 +182,18 @@ pub async fn start(
                         }
                         continue;
                     }
+                    if event.event_type.as_deref() == Some("token-usage") {
+                        if let Some(tokens) = event.asr_tokens {
+                            let usage_state = worker_state.clone();
+                            let usage_app = worker_app.clone();
+                            let estimated = event.asr_tokens_estimated.unwrap_or(true);
+                            tauri::async_runtime::spawn(async move {
+                                let usage = usage_state.record_asr_tokens(tokens, estimated).await;
+                                let _ = usage_app.emit("token-usage", &usage);
+                            });
+                        }
+                        continue;
+                    }
                     if let Some(error) = event.error {
                         eprintln!("[whisper-worker] {error}");
                         if let Some(tx) = startup_tx.take() {
@@ -204,7 +221,19 @@ pub async fn start(
                     let app_state = worker_state.clone();
                     let subtitle_app = worker_app.clone();
                     tauri::async_runtime::spawn(async move {
-                        let translated = publish_with_translation(&app_state, subtitle).await;
+                        let (translated, translation_result) =
+                            publish_with_translation(&app_state, subtitle).await;
+                        if let Some(result) = translation_result {
+                            let usage = app_state
+                                .record_translation_tokens(
+                                    result.prompt_tokens,
+                                    result.completion_tokens,
+                                    result.total_tokens,
+                                    result.usage_estimated,
+                                )
+                                .await;
+                            let _ = subtitle_app.emit("token-usage", &usage);
+                        }
                         // A final subtitle is first delivered immediately so the
                         // Chinese text is never held up by a network translation.
                         // Send one more UI event only when translation added a
@@ -246,6 +275,7 @@ pub async fn start(
     });
     match startup_rx.recv_timeout(Duration::from_secs(180)) {
         Ok(Ok(())) => {
+            let _ = app.emit("token-usage", &session_token_usage);
             write_diagnostic(&diagnostics_log, "host", "worker 已完成初始化");
             Ok(())
         }

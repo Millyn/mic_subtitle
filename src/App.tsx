@@ -7,11 +7,13 @@ import {
   getHardwareInfo,
   getModels,
   getServerStatus,
+  getTokenUsage,
   onAudioLevel,
   onRecognitionError,
   onRecognitionStatus,
   onModelProgress,
   onSubtitle,
+  onTokenUsage,
   pauseModelDownload,
   pauseRecognition,
   resetStyle,
@@ -38,6 +40,8 @@ import {
   type ServerStatus,
   type SubtitleEvent,
   type SubtitleStyle,
+  emptyTokenUsage,
+  type TokenUsage,
 } from "./types";
 
 const desktopRuntime = () => typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
@@ -76,6 +80,8 @@ const formatBytes = (bytes: number) => {
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} GB`;
   return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
 };
+
+const formatCount = (value: number) => new Intl.NumberFormat("zh-CN").format(value || 0);
 
 function Icon({ name, size = 18 }: { name: string; size?: number }) {
   const common = { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
@@ -124,6 +130,10 @@ function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [modelProgress, setModelProgress] = useState<Record<string, ModelDownloadProgress>>({});
   const [isSaving, setIsSaving] = useState(false);
+  const [tokenUsage, setTokenUsage] = useState<TokenUsage>(() => ({
+    session: { ...emptyTokenUsage.session },
+    allTime: { ...emptyTokenUsage.allTime },
+  }));
 
   const addLog = (message: string, tone: LogEntry["tone"] = "neutral") => {
     setLogs((previous) => [{ id: `${Date.now()}-${Math.random()}`, time: nowLabel(), tone, message }, ...previous].slice(0, 8));
@@ -140,13 +150,14 @@ function App() {
         return;
       }
       try {
-        const [nextConfig, nextDevices, nextServer, nextModels, nextHardware] = await Promise.all([getConfig(), getAudioDevices(), getServerStatus(), getModels(), getHardwareInfo()]);
+        const [nextConfig, nextDevices, nextServer, nextModels, nextHardware, nextTokenUsage] = await Promise.all([getConfig(), getAudioDevices(), getServerStatus(), getModels(), getHardwareInfo(), getTokenUsage()]);
         if (cancelled) return;
         setConfig(cloneConfig(nextConfig));
         setDevices(nextDevices);
         setServer(nextServer);
         setModels(nextModels);
         setHardware(nextHardware);
+        setTokenUsage(nextTokenUsage);
         addLog("本机字幕服务已连接", "success");
         addLog(`${nextDevices.length} 个麦克风设备可用`, "neutral");
         addLog(`硬件建议使用 ${nextHardware.recommendedModel} 模型`, "neutral");
@@ -216,6 +227,7 @@ function App() {
           setRecognitionDiagnostic(message);
           addLog(message, "neutral");
         })],
+        ["token-usage", () => onTokenUsage(setTokenUsage)],
       ];
       for (const [name, create] of subscriptions) {
         if (disposed) break;
@@ -269,7 +281,14 @@ function App() {
   };
 
   const updateConfig = (patch: Partial<AppConfig>) => setConfig((previous) => ({ ...previous, ...patch }));
-  const updateStyle = (patch: Partial<SubtitleStyle>) => setConfig((previous) => ({ ...previous, style: { ...previous.style, ...patch } }));
+  const updateStyle = (patch: Partial<SubtitleStyle>) => setConfig((previous) => {
+    const nextStyle = { ...previous.style, ...patch };
+    if (patch.position) {
+      nextStyle.subtitleX = Math.round(nextStyle.canvasWidth * 0.5);
+      nextStyle.subtitleY = Math.round(nextStyle.canvasHeight * (patch.position === "top" ? 0.16 : patch.position === "center" ? 0.5 : 0.83));
+    }
+    return { ...previous, style: nextStyle };
+  });
 
   const handleStart = async () => {
     if (recognitionStatus === "running") return;
@@ -498,7 +517,7 @@ function App() {
 
         <div className="sidebar-bottom">
           <div className="local-card"><div className="local-icon"><Icon name="shield" size={16} /></div><div><strong>本地优先</strong><span>识别在此设备运行</span></div><span className="green-dot" /></div>
-          <div className="version">声译 v0.1.15 <span>·</span> Windows 版</div>
+          <div className="version">声译 v0.1.16 <span>·</span> Windows 版</div>
         </div>
       </aside>
 
@@ -513,10 +532,10 @@ function App() {
         </header>
 
         <div className="content-scroll">
-          {page === "dashboard" && <DashboardPage {...{ config, devices, server, audioLevel, recognitionDiagnostic, recognitionStatus, currentSubtitle, logs, currentModel, onStart: handleStart, onPause: handlePause, onStop: handleStop, onDeviceChange: handleDeviceChange, onCopyUrl: copyOverlayUrl, onOpenPage: setPage, onTestTranslation: handleTestTranslation }} />}
+          {page === "dashboard" && <DashboardPage {...{ config, devices, server, audioLevel, recognitionDiagnostic, recognitionStatus, currentSubtitle, logs, tokenUsage, currentModel, onStart: handleStart, onPause: handlePause, onStop: handleStop, onDeviceChange: handleDeviceChange, onCopyUrl: copyOverlayUrl, onOpenPage: setPage, onTestTranslation: handleTestTranslation }} />}
           {page === "models" && <><HardwareHint hardware={hardware} /><ModelsPage models={models} progress={modelProgress} onDownload={handleDownload} onPause={handlePauseDownload} onVerify={handleVerify} onDelete={handleDelete} onSelect={handleSelectModel} /></>}
           {page === "style" && <StylePage style={config.style} currentSubtitle={currentSubtitle} onChange={updateStyle} onSave={handleSaveStyle} onReset={handleResetStyle} />}
-          {page === "settings" && <SettingsPage config={config} server={server} isSaving={isSaving} onChange={updateConfig} onSave={saveSettings} onTest={handleTestTranslation} />}
+          {page === "settings" && <SettingsPageV2 config={config} server={server} isSaving={isSaving} onChange={updateConfig} onSave={saveSettings} onTest={handleTestTranslation} />}
         </div>
       </main>
       {toast && <Toast message={toast} onClose={() => setToast(null)} />}
@@ -547,6 +566,7 @@ function DashboardPage(props: {
   recognitionStatus: "idle" | "running" | "paused" | "error";
   currentSubtitle: SubtitleEvent | null;
   logs: LogEntry[];
+  tokenUsage: TokenUsage;
   currentModel?: ModelView;
   onStart: () => void;
   onPause: () => void;
@@ -556,9 +576,10 @@ function DashboardPage(props: {
   onOpenPage: (page: Page) => void;
   onTestTranslation: () => void;
 }) {
-  const { config, devices, server, audioLevel, recognitionDiagnostic, recognitionStatus, currentSubtitle, logs, currentModel } = props;
+  const { config, devices, server, audioLevel, recognitionDiagnostic, recognitionStatus, currentSubtitle, logs, tokenUsage, currentModel } = props;
   const running = recognitionStatus === "running";
   const hasEnglish = Boolean(currentSubtitle?.english);
+  const translationTokenLabel = tokenUsage.session.translationEstimated ? "翻译输入 / 输出（估算）" : "翻译输入 / 输出";
   return <div className="dashboard-page">
     <section className="hero-row">
       <div className="hero-copy"><div className="live-kicker"><span className="pulse-ring" />实时字幕工作区</div><h2>把每一句话，<span>清晰地传达。</span></h2><p>本地语音识别 · 可选云端翻译 · 为 OBS 而生</p></div>
@@ -594,6 +615,7 @@ function DashboardPage(props: {
 
     <div className="bottom-grid">
       <section className="panel obs-panel"><PanelHeading eyebrow="BROWSER SOURCE" title="OBS 字幕源" action={<button className="text-button" onClick={() => props.onOpenPage("settings")}>服务设置 <Icon name="chevron" size={13} /></button>} /><div className="obs-body"><div className="url-box"><Icon name="link" size={16} /><span>{server.overlayUrl || "http://127.0.0.1:39071/overlay"}</span><button onClick={props.onCopyUrl}><Icon name="copy" size={15} />复制</button></div><div className="obs-tips"><span><i>1</i>复制地址</span><span><i>2</i>添加浏览器源</span><span><i>3</i>设置为透明背景</span></div></div></section>
+      <section className="panel token-panel"><PanelHeading eyebrow="TOKEN USAGE" title="本次用量" action={<span className="log-count">{formatCount(tokenUsage.session.totalTokens)} tokens</span>} /><div className="token-body"><div className="token-main"><strong>{formatCount(tokenUsage.session.totalTokens)}</strong><span>本次识别总 Token</span></div><div className="token-row"><span>本地识别（估算）</span><b>{formatCount(tokenUsage.session.asrTokens)}</b></div><div className="token-row"><span>{translationTokenLabel}</span><b>{formatCount(tokenUsage.session.translationPromptTokens)} / {formatCount(tokenUsage.session.translationCompletionTokens)}</b></div><div className="token-foot">累计 {formatCount(tokenUsage.allTime.totalTokens)} · {tokenUsage.session.translationRequests} 次翻译请求</div></div></section>
       <section className="panel activity-panel"><PanelHeading eyebrow="ACTIVITY" title="运行日志" action={<span className="log-count">{logs.length} 条</span>} /><div className="activity-list">{logs.length ? logs.slice(0, 4).map((log) => <div className="activity-item" key={log.id}><span className={`activity-icon ${log.tone}`}><Icon name={log.tone === "error" ? "" : log.tone === "success" ? "check" : "grid"} size={12} /></span><span>{log.message}</span><time>{log.time}</time></div>) : <div className="empty-log">暂无运行记录</div>}</div></section>
     </div>
   </div>;
@@ -622,6 +644,28 @@ function StylePage({ style, currentSubtitle, onChange, onSave, onReset }: { styl
 
 function Range({ value, min, max, suffix, onChange }: { value: number; min: number; max: number; suffix: string; onChange: (value: number) => void }) { return <div className="range-wrap"><input type="range" min={min} max={max} value={value} onChange={(e) => onChange(Number(e.target.value))} /><output>{Math.round(value)}{suffix}</output></div>; }
 function hexToRgba(hex: string, alpha: number) { const clean = hex.replace("#", ""); const value = Number.parseInt(clean.length === 3 ? clean.split("").map((c) => c + c).join("") : clean, 16); return `rgba(${(value >> 16) & 255}, ${(value >> 8) & 255}, ${value & 255}, ${alpha})`; }
+
+function SettingsPageV2({ config, server, isSaving, onChange, onSave, onTest }: { config: AppConfig; server: ServerStatus; isSaving: boolean; onChange: (patch: Partial<AppConfig>) => void; onSave: () => void; onTest: () => void }) {
+  const overlayUrl = server.overlayUrl || `http://${server.host || "127.0.0.1"}:${config.serverPort}/overlay`;
+  const editorUrl = server.editorUrl || `http://${server.host || "127.0.0.1"}:${config.serverPort}/editor`;
+  const style = config.style;
+  const updateStyle = (patch: Partial<SubtitleStyle>) => onChange({ style: { ...style, ...patch } });
+  const updateCanvas = (field: "canvasWidth" | "canvasHeight", raw: number) => {
+    const oldValue = field === "canvasWidth" ? style.canvasWidth : style.canvasHeight;
+    const nextValue = Math.max(field === "canvasWidth" ? 320 : 180, Math.min(field === "canvasWidth" ? 16384 : 8640, Math.round(raw || oldValue)));
+    const ratio = nextValue / Math.max(1, oldValue);
+    updateStyle(field === "canvasWidth" ? { canvasWidth: nextValue, subtitleX: Math.round(style.subtitleX * ratio) } : { canvasHeight: nextValue, subtitleY: Math.round(style.subtitleY * ratio) });
+  };
+  const updateAnchor = (field: "subtitleX" | "subtitleY", raw: number) => {
+    const limit = field === "subtitleX" ? style.canvasWidth : style.canvasHeight;
+    updateStyle({ [field]: Math.max(0, Math.min(limit, Math.round(Number.isFinite(raw) ? raw : 0))) });
+  };
+  const applyPreset = (position: SubtitleStyle["position"]) => {
+    const y = position === "top" ? Math.round(style.canvasHeight * 0.16) : position === "center" ? Math.round(style.canvasHeight * 0.5) : Math.round(style.canvasHeight * 0.83);
+    updateStyle({ position, subtitleX: Math.round(style.canvasWidth * 0.5), subtitleY: y });
+  };
+  return <div className="subpage settings-page"><div className="subpage-intro"><div><p className="section-kicker">PRIVATE CONNECTIONS</p><h2>控制你的字幕管线</h2><p>API Key 只保存在本机配置中，不会发送到 OBS 字幕页面。</p></div><button className="dark-button save-settings" onClick={onSave} disabled={isSaving}>{isSaving ? "保存中…" : "保存全部设置"}</button></div><div className="settings-grid"><section className="panel settings-card"><PanelHeading eyebrow="TRANSLATION" title="DeepSeek 翻译" action={<button className={`toggle ${config.deepseek.enabled ? "on" : ""}`} onClick={() => onChange({ deepseek: { ...config.deepseek, enabled: !config.deepseek.enabled } })}><i /></button>} /><p className="card-description">确认中文句子后发送到 DeepSeek，翻译失败时仍保留本地中文字幕。</p><label className="form-label">API Key<input type="password" value={config.deepseek.apiKey} placeholder="sk-…" onChange={(e) => onChange({ deepseek: { ...config.deepseek, apiKey: e.target.value } })} autoComplete="off" /></label><label className="form-label">API 地址<input value={config.deepseek.baseUrl} onChange={(e) => onChange({ deepseek: { ...config.deepseek, baseUrl: e.target.value } })} /></label><label className="form-label">模型名<input value={config.deepseek.model} onChange={(e) => onChange({ deepseek: { ...config.deepseek, model: e.target.value } })} /></label><button className="outline-button full-button" onClick={onTest}><Icon name="link" size={14} />发送翻译测试</button><div className="security-callout"><Icon name="shield" size={16} /><span><b>密钥隔离</b><small>翻译请求由桌面端发出，OBS 只能看到翻译结果。</small></span></div></section><section className="panel settings-card"><PanelHeading eyebrow="SERVICE" title="局域网字幕服务" /><p className="card-description">服务监听所有网卡，OBS 可以从本机或同一局域网的其他设备访问。</p><label className="form-label">监听端口<input type="number" min={1024} max={65535} value={config.serverPort} onChange={(e) => onChange({ serverPort: Number(e.target.value) || 39071 })} /></label><div className="service-preview"><div><span>OBS 字幕页面</span><b>{overlayUrl}</b></div><span className={`service-live ${server.running ? "" : "offline"}`}><i />{server.running ? "监听中" : "启动中"}</span></div><div className="service-preview"><div><span>样式编辑器</span><b>{editorUrl}</b></div><span className="service-live"><i />可访问</span></div><div className="settings-note"><Icon name="check" size={15} />监听地址：0.0.0.0:{server.port || config.serverPort} · Windows 防火墙首次提示请选择“专用网络”</div></section><section className="panel settings-card canvas-card"><PanelHeading eyebrow="OBS CANVAS" title="画布与字幕位置" /><p className="card-description">Overlay 以画布左上角为原点，X/Y 表示字幕框中心点。OBS 浏览器源建议设置为相同的画布比例。</p><div className="two-fields canvas-fields"><label>画布宽度<input type="number" min={320} max={16384} value={style.canvasWidth} onChange={(e) => updateCanvas("canvasWidth", Number(e.target.value))} /></label><label>画布高度<input type="number" min={180} max={8640} value={style.canvasHeight} onChange={(e) => updateCanvas("canvasHeight", Number(e.target.value))} /></label></div><div className="two-fields canvas-fields"><label>字幕 X<input type="number" min={0} max={style.canvasWidth} value={style.subtitleX} onChange={(e) => updateAnchor("subtitleX", Number(e.target.value))} /></label><label>字幕 Y<input type="number" min={0} max={style.canvasHeight} value={style.subtitleY} onChange={(e) => updateAnchor("subtitleY", Number(e.target.value))} /></label></div><div className="position-presets"><span>快速定位</span><button className={style.position === "top" ? "active" : ""} onClick={() => applyPreset("top")}>顶部</button><button className={style.position === "center" ? "active" : ""} onClick={() => applyPreset("center")}>居中</button><button className={style.position === "bottom" ? "active" : ""} onClick={() => applyPreset("bottom")}>底部</button></div><div className="settings-note"><Icon name="check" size={15} />当前锚点：{style.subtitleX} × {style.subtitleY} · 保存后实时同步到 OBS</div></section></div></div>;
+}
 
 function SettingsPage({ config, server, isSaving, onChange, onSave, onTest }: { config: AppConfig; server: ServerStatus; isSaving: boolean; onChange: (patch: Partial<AppConfig>) => void; onSave: () => void; onTest: () => void }) {
   const overlayUrl = server.overlayUrl || `http://${server.host || "127.0.0.1"}:${config.serverPort}/overlay`;

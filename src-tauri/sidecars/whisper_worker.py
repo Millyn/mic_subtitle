@@ -14,8 +14,10 @@ standalone diagnostics and development.
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 from collections import deque
 import json
+import os
 from pathlib import Path
 import queue
 import sys
@@ -162,6 +164,48 @@ def configure_qwen_generation(model: Any) -> None:
             return
 
 
+def estimate_text_tokens(model: Any, text: str) -> tuple[int, bool]:
+    """Count transcript tokens when a local tokenizer is available.
+
+    Local ASR libraries do not expose a billing-style token counter. The value
+    is therefore deliberately marked estimated, even when it comes from the
+    model tokenizer, so the UI never presents it as an API billable count.
+    """
+    tokenizer_candidates = [
+        getattr(model, "tokenizer", None),
+        getattr(getattr(model, "processor", None), "tokenizer", None),
+        getattr(getattr(model, "model", None), "tokenizer", None),
+    ]
+    for tokenizer in tokenizer_candidates:
+        if tokenizer is None:
+            continue
+        try:
+            encoded = tokenizer(text, add_special_tokens=False)
+            input_ids = encoded.get("input_ids") if isinstance(encoded, dict) else None
+            if input_ids is None:
+                continue
+            if hasattr(input_ids, "numel"):
+                return max(1, int(input_ids.numel())), True
+            if isinstance(input_ids, (list, tuple)):
+                if input_ids and isinstance(input_ids[0], (list, tuple)):
+                    input_ids = input_ids[0]
+                return max(1, len(input_ids)), True
+        except Exception:
+            continue
+    return max(1, len(text)), True
+
+
+def inference_context(torch_module: Any) -> Any:
+    """Use the lightest available no-grad context across torch versions."""
+    inference_mode = getattr(torch_module, "inference_mode", None)
+    if callable(inference_mode):
+        return inference_mode()
+    no_grad = getattr(torch_module, "no_grad", None)
+    if callable(no_grad):
+        return no_grad()
+    return nullcontext()
+
+
 def read_exact(stream: Any, size: int) -> bytes:
     chunks: list[bytes] = []
     remaining = size
@@ -237,6 +281,20 @@ def main() -> int:
             use_cuda = args.device != "cpu" and torch.cuda.is_available()
             device = "cuda:0" if use_cuda else "cpu"
             dtype = torch.float16 if use_cuda else torch.float32
+            if not use_cuda:
+                cpu_threads = max(1, min(4, (os.cpu_count() or 4) // 2))
+                try:
+                    torch.set_num_threads(cpu_threads)
+                except Exception:
+                    pass
+                try:
+                    torch.set_num_interop_threads(1)
+                except Exception:
+                    pass
+            try:
+                torch.set_grad_enabled(False)
+            except Exception:
+                pass
             model = Qwen3ASRModel.from_pretrained(
                 str(model_path),
                 dtype=dtype,
@@ -246,6 +304,10 @@ def main() -> int:
                 local_files_only=True,
             )
             configure_qwen_generation(model)
+            for candidate in (model, getattr(model, "model", None)):
+                eval_method = getattr(candidate, "eval", None)
+                if callable(eval_method):
+                    eval_method()
         except Exception as error:  # pragma: no cover - depends on local torch/model
             emit({
                 "type": "error",
@@ -255,10 +317,11 @@ def main() -> int:
 
         def transcribe_audio(audio: np.ndarray, sample_rate: int) -> tuple[str, str]:
             language = None if args.language == "auto" else args.language
-            results = model.transcribe(
-                audio=(audio.astype(np.float32, copy=False), sample_rate),
-                language=language,
-            )
+            with inference_context(torch):
+                results = model.transcribe(
+                    audio=(audio.astype(np.float32, copy=False), sample_rate),
+                    language=language,
+                )
             result = results[0] if results else None
             text = str(getattr(result, "text", "") or "").strip() if result else ""
             detected_language = str(getattr(result, "language", "") or "").strip() if result else ""
@@ -269,10 +332,11 @@ def main() -> int:
             # documented Chinese language hint; English and other languages
             # still use automatic detection on the first pass.
             if not text and language is None:
-                fallback_results = model.transcribe(
-                    audio=(audio.astype(np.float32, copy=False), sample_rate),
-                    language="Chinese",
-                )
+                with inference_context(torch):
+                    fallback_results = model.transcribe(
+                        audio=(audio.astype(np.float32, copy=False), sample_rate),
+                        language="Chinese",
+                    )
                 fallback = fallback_results[0] if fallback_results else None
                 text = str(getattr(fallback, "text", "") or "").strip() if fallback else ""
                 detected_language = str(getattr(fallback, "language", "") or "Chinese").strip() if fallback else ""
@@ -288,6 +352,8 @@ def main() -> int:
                 str(model_path),
                 device=args.device,
                 compute_type=compute_type,
+                cpu_threads=max(1, min(4, (os.cpu_count() or 4) // 2)),
+                num_workers=1,
             )
         except Exception as error:  # pragma: no cover - depends on local CUDA/model
             emit({"type": "error", "error": f"无法加载 faster-whisper 模型：{error}"})
@@ -306,7 +372,7 @@ def main() -> int:
     # Inference can be slower than realtime on a CPU. A bounded queue keeps
     # recognition focused on recent audio instead of building an unbounded
     # backlog while the model is running.
-    audio_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=64)
+    audio_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=32)
     latest_rms = 0.0
     last_callback_time = 0.0
     received_samples = 0
@@ -537,6 +603,14 @@ def main() -> int:
                 detected_language = ""
             inference_duration = time.monotonic() - inference_started
             if text:
+                asr_tokens, asr_tokens_estimated = estimate_text_tokens(model, text)
+                emit(
+                    {
+                        "type": "token-usage",
+                        "asrTokens": asr_tokens,
+                        "asrTokensEstimated": asr_tokens_estimated,
+                    }
+                )
                 subtitle_payload = {"kind": "partial", "text": text}
                 if detected_language:
                     subtitle_payload["language"] = detected_language
@@ -551,6 +625,7 @@ def main() -> int:
                     f"模型返回空文本：已提交 {duration:.1f} 秒音频（峰值 RMS {peak_rms:.4f}）",
                 )
 
+            del audio
             chunks.clear()
             pre_roll.clear()
             buffered_samples = 0

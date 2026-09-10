@@ -9,6 +9,10 @@ use tokio::sync::{broadcast, oneshot, RwLock};
 use uuid::Uuid;
 
 pub const DEFAULT_SERVER_PORT: u16 = 39071;
+pub const DEFAULT_CANVAS_WIDTH: u32 = 1920;
+pub const DEFAULT_CANVAS_HEIGHT: u32 = 1080;
+pub const DEFAULT_SUBTITLE_X: u32 = DEFAULT_CANVAS_WIDTH / 2;
+pub const DEFAULT_SUBTITLE_Y: u32 = 900;
 
 pub fn default_server_port() -> u16 {
     DEFAULT_SERVER_PORT
@@ -20,6 +24,22 @@ pub fn normalize_server_port(port: u16) -> u16 {
     } else {
         port
     }
+}
+
+fn default_canvas_width() -> u32 {
+    DEFAULT_CANVAS_WIDTH
+}
+
+fn default_canvas_height() -> u32 {
+    DEFAULT_CANVAS_HEIGHT
+}
+
+fn default_subtitle_x() -> u32 {
+    DEFAULT_SUBTITLE_X
+}
+
+fn default_subtitle_y() -> u32 {
+    DEFAULT_SUBTITLE_Y
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +59,14 @@ pub struct SubtitleStyle {
     pub layout: String,
     pub alignment: String,
     pub position: String,
+    #[serde(default = "default_canvas_width")]
+    pub canvas_width: u32,
+    #[serde(default = "default_canvas_height")]
+    pub canvas_height: u32,
+    #[serde(default = "default_subtitle_x")]
+    pub subtitle_x: u32,
+    #[serde(default = "default_subtitle_y")]
+    pub subtitle_y: u32,
     pub max_width: u32,
     pub line_spacing: f32,
     pub show_temporary: bool,
@@ -68,6 +96,10 @@ impl Default for SubtitleStyle {
             layout: "stacked".into(),
             alignment: "center".into(),
             position: "bottom".into(),
+            canvas_width: DEFAULT_CANVAS_WIDTH,
+            canvas_height: DEFAULT_CANVAS_HEIGHT,
+            subtitle_x: DEFAULT_SUBTITLE_X,
+            subtitle_y: DEFAULT_SUBTITLE_Y,
             max_width: 1100,
             line_spacing: 1.3,
             show_temporary: true,
@@ -78,6 +110,20 @@ impl Default for SubtitleStyle {
             outline_color: "#020617".into(),
             shadow: true,
         }
+    }
+}
+
+impl SubtitleStyle {
+    pub fn normalize(&mut self) {
+        self.canvas_width = self.canvas_width.clamp(320, 16_384);
+        self.canvas_height = self.canvas_height.clamp(180, 8_640);
+        self.subtitle_x = self.subtitle_x.min(self.canvas_width);
+        self.subtitle_y = self.subtitle_y.min(self.canvas_height);
+        self.max_width = self.max_width.clamp(200, self.canvas_width);
+        self.line_spacing = self.line_spacing.clamp(0.8, 3.0);
+        self.background_opacity = self.background_opacity.clamp(0.0, 1.0);
+        self.chinese.opacity = self.chinese.opacity.clamp(0.0, 1.0);
+        self.english.opacity = self.english.opacity.clamp(0.0, 1.0);
     }
 }
 
@@ -161,6 +207,62 @@ pub struct SubtitleEvent {
     pub translation_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenCounter {
+    pub asr_utterances: u64,
+    pub asr_tokens: u64,
+    pub asr_estimated: bool,
+    pub translation_requests: u64,
+    pub translation_prompt_tokens: u64,
+    pub translation_completion_tokens: u64,
+    pub translation_total_tokens: u64,
+    pub translation_estimated: bool,
+    pub total_tokens: u64,
+}
+
+impl TokenCounter {
+    fn add_asr(&mut self, tokens: u64, estimated: bool) {
+        self.asr_utterances = self.asr_utterances.saturating_add(1);
+        self.asr_tokens = self.asr_tokens.saturating_add(tokens);
+        self.total_tokens = self.total_tokens.saturating_add(tokens);
+        self.asr_estimated |= estimated;
+    }
+
+    fn add_translation(
+        &mut self,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        total_tokens: u64,
+        estimated: bool,
+    ) {
+        let total_tokens = if total_tokens == 0 {
+            prompt_tokens.saturating_add(completion_tokens)
+        } else {
+            total_tokens
+        };
+        self.translation_requests = self.translation_requests.saturating_add(1);
+        self.translation_prompt_tokens = self
+            .translation_prompt_tokens
+            .saturating_add(prompt_tokens);
+        self.translation_completion_tokens = self
+            .translation_completion_tokens
+            .saturating_add(completion_tokens);
+        self.translation_total_tokens = self
+            .translation_total_tokens
+            .saturating_add(total_tokens);
+        self.translation_estimated |= estimated;
+        self.total_tokens = self.total_tokens.saturating_add(total_tokens);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenUsage {
+    pub session: TokenCounter,
+    pub all_time: TokenCounter,
+}
+
 impl SubtitleEvent {
     pub fn new(kind: impl Into<String>, chinese: impl Into<String>) -> Self {
         Self {
@@ -207,6 +309,7 @@ pub struct AppState {
     pub recognition_capture: Arc<Mutex<Option<crate::audio::RecognitionCapture>>>,
     pub recognition_child: Arc<Mutex<Option<Child>>>,
     pub download_cancellations: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    pub token_usage: Arc<RwLock<TokenUsage>>,
 }
 
 impl AppState {
@@ -228,6 +331,7 @@ impl AppState {
             recognition_capture: Arc::new(Mutex::new(None)),
             recognition_child: Arc::new(Mutex::new(None)),
             download_cancellations: Arc::new(Mutex::new(HashMap::new())),
+            token_usage: Arc::new(RwLock::new(TokenUsage::default())),
         })
     }
 
@@ -282,6 +386,40 @@ impl AppState {
         let subtitle = self.latest_subtitle.read().await.clone();
         WsMessage::Init { style, subtitle }
     }
+
+    pub async fn get_token_usage(&self) -> TokenUsage {
+        self.token_usage.read().await.clone()
+    }
+
+    pub async fn reset_token_session(&self) -> TokenUsage {
+        let mut usage = self.token_usage.write().await;
+        usage.session = TokenCounter::default();
+        usage.clone()
+    }
+
+    pub async fn record_asr_tokens(&self, tokens: u64, estimated: bool) -> TokenUsage {
+        let mut usage = self.token_usage.write().await;
+        usage.session.add_asr(tokens, estimated);
+        usage.all_time.add_asr(tokens, estimated);
+        usage.clone()
+    }
+
+    pub async fn record_translation_tokens(
+        &self,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        total_tokens: u64,
+        estimated: bool,
+    ) -> TokenUsage {
+        let mut usage = self.token_usage.write().await;
+        usage
+            .session
+            .add_translation(prompt_tokens, completion_tokens, total_tokens, estimated);
+        usage
+            .all_time
+            .add_translation(prompt_tokens, completion_tokens, total_tokens, estimated);
+        usage.clone()
+    }
 }
 
 fn read_config(path: &Path) -> Result<AppConfig, String> {
@@ -289,7 +427,10 @@ fn read_config(path: &Path) -> Result<AppConfig, String> {
         return Ok(AppConfig::default());
     }
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
-    serde_json::from_slice(&bytes).map_err(|error| format!("配置文件损坏：{error}"))
+    let mut config: AppConfig =
+        serde_json::from_slice(&bytes).map_err(|error| format!("配置文件损坏：{error}"))?;
+    config.style.normalize();
+    Ok(config)
 }
 
 pub fn now_millis() -> u64 {

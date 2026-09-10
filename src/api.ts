@@ -9,6 +9,7 @@ import type {
   ServerStatus,
   SubtitleEvent,
   SubtitleStyle,
+  TokenUsage,
 } from "./types";
 
 const isTauri = () => typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
@@ -66,6 +67,10 @@ export async function pauseRecognition(): Promise<void> {
 
 export async function getServerStatus(): Promise<ServerStatus> {
   return call<ServerStatus>("get_server_status");
+}
+
+export async function getTokenUsage(): Promise<TokenUsage> {
+  return call<TokenUsage>("get_token_usage");
 }
 
 export async function getHardwareInfo(): Promise<HardwareInfo> {
@@ -130,4 +135,8 @@ export function onRecognitionStatus(handler: (message: string) => void): Promise
 
 export function onModelProgress(handler: (event: ModelDownloadProgress) => void): Promise<UnlistenFn> {
   return listen<ModelDownloadProgress>("model-download", (event) => handler(event.payload));
+}
+
+export function onTokenUsage(handler: (usage: TokenUsage) => void): Promise<UnlistenFn> {
+  return listen<TokenUsage>("token-usage", (event) => handler(event.payload));
 }
