@@ -76,7 +76,7 @@ pip install -r src-tauri/sidecars/requirements.txt
 
 ## Windows 试用包
 
-当前工作区会生成带版本号的 Windows 试用包，例如 `dist-windows/voice-caption-studio-v0.1.14-windows-x64.zip`。解压后双击 `声译-实时字幕工作台.exe` 即可启动桌面端；压缩包内已带 Windows loader、Rust 运行库和 worker 脚本。Windows 10/11 还需要系统安装 WebView2 Runtime。
+当前工作区会生成带版本号的 Windows 试用包，例如 `dist-windows/voice-caption-studio-v0.1.15-windows-x64.zip`。解压后双击 `声译-实时字幕工作台.exe` 即可启动桌面端；压缩包内已带 Windows loader、Rust 运行库和 worker 脚本。Windows 10/11 还需要系统安装 WebView2 Runtime。
 
 若要使用真实语音识别，在解压目录打开 PowerShell，先安装 64 位 Python 运行时和依赖：
 

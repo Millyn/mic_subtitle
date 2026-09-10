@@ -98,7 +98,7 @@ async fn translate_deepseek(config: &AppConfig, text: &str) -> Result<String, St
         stream: false,
     };
     let client = reqwest::Client::builder()
-        .user_agent("voice-caption-studio/0.1.14")
+        .user_agent("voice-caption-studio/0.1.15")
         .build()
         .map_err(|error| error.to_string())?;
     let response = client

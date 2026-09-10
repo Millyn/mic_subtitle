@@ -498,7 +498,7 @@ function App() {
 
         <div className="sidebar-bottom">
           <div className="local-card"><div className="local-icon"><Icon name="shield" size={16} /></div><div><strong>本地优先</strong><span>识别在此设备运行</span></div><span className="green-dot" /></div>
-          <div className="version">声译 v0.1.14 <span>·</span> Windows 版</div>
+          <div className="version">声译 v0.1.15 <span>·</span> Windows 版</div>
         </div>
       </aside>
 
