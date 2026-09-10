@@ -26,6 +26,10 @@ pub fn normalize_server_port(port: u16) -> u16 {
     }
 }
 
+pub fn default_recognition_language() -> String {
+    "Chinese".into()
+}
+
 fn default_canvas_width() -> u32 {
     DEFAULT_CANVAS_WIDTH
 }
@@ -136,6 +140,13 @@ pub struct DeepSeekConfig {
     pub model: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GlossaryEntry {
+    pub source: String,
+    pub target: String,
+}
+
 impl Default for DeepSeekConfig {
     fn default() -> Self {
         Self {
@@ -174,6 +185,10 @@ pub struct AppConfig {
     pub selected_device: Option<String>,
     pub active_model: String,
     pub deepseek: DeepSeekConfig,
+    #[serde(default = "default_recognition_language")]
+    pub recognition_language: String,
+    #[serde(default)]
+    pub glossary: Vec<GlossaryEntry>,
     pub style: SubtitleStyle,
     #[serde(default = "default_server_port")]
     pub server_port: u16,
@@ -187,10 +202,37 @@ impl Default for AppConfig {
             selected_device: None,
             active_model: "qwen3-asr-0.6b".into(),
             deepseek: DeepSeekConfig::default(),
+            recognition_language: default_recognition_language(),
+            glossary: Vec::new(),
             style: SubtitleStyle::default(),
             server_port: DEFAULT_SERVER_PORT,
             models: HashMap::new(),
         }
+    }
+}
+
+impl AppConfig {
+    pub fn normalize(&mut self) {
+        self.style.normalize();
+        if !matches!(
+            self.recognition_language.as_str(),
+            "auto" | "Chinese" | "Chinese,English"
+        ) {
+            self.recognition_language = default_recognition_language();
+        }
+        let mut normalized = Vec::with_capacity(self.glossary.len().min(200));
+        for entry in self.glossary.drain(..).take(200) {
+            let source = entry.source.trim();
+            let target = entry.target.trim();
+            if source.is_empty() || target.is_empty() {
+                continue;
+            }
+            normalized.push(GlossaryEntry {
+                source: source.chars().take(120).collect(),
+                target: target.chars().take(160).collect(),
+            });
+        }
+        self.glossary = normalized;
     }
 }
 
@@ -242,15 +284,12 @@ impl TokenCounter {
             total_tokens
         };
         self.translation_requests = self.translation_requests.saturating_add(1);
-        self.translation_prompt_tokens = self
-            .translation_prompt_tokens
-            .saturating_add(prompt_tokens);
+        self.translation_prompt_tokens =
+            self.translation_prompt_tokens.saturating_add(prompt_tokens);
         self.translation_completion_tokens = self
             .translation_completion_tokens
             .saturating_add(completion_tokens);
-        self.translation_total_tokens = self
-            .translation_total_tokens
-            .saturating_add(total_tokens);
+        self.translation_total_tokens = self.translation_total_tokens.saturating_add(total_tokens);
         self.translation_estimated |= estimated;
         self.total_tokens = self.total_tokens.saturating_add(total_tokens);
     }
@@ -429,7 +468,7 @@ fn read_config(path: &Path) -> Result<AppConfig, String> {
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
     let mut config: AppConfig =
         serde_json::from_slice(&bytes).map_err(|error| format!("配置文件损坏：{error}"))?;
-    config.style.normalize();
+    config.normalize();
     Ok(config)
 }
 

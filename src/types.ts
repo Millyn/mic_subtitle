@@ -43,10 +43,17 @@ export interface DeepSeekConfig {
   model: string;
 }
 
+export interface GlossaryEntry {
+  source: string;
+  target: string;
+}
+
 export interface AppConfig {
   selectedDevice: string | null;
   activeModel: string;
   deepseek: DeepSeekConfig;
+  recognitionLanguage: "auto" | "Chinese" | "Chinese,English";
+  glossary: GlossaryEntry[];
   style: SubtitleStyle;
   serverPort: number;
 }
@@ -173,6 +180,8 @@ export const emptyConfig: AppConfig = {
     baseUrl: "https://api.deepseek.com",
     model: "deepseek-chat",
   },
+  recognitionLanguage: "Chinese",
+  glossary: [],
   style: defaultStyle,
   serverPort: 39071,
 };

@@ -19,18 +19,20 @@ async fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
 
 #[tauri::command]
 async fn save_config(state: State<'_, AppState>, config: AppConfig) -> Result<AppConfig, String> {
+    let mut next = config;
+    next.normalize();
     let mut current = state.config.write().await;
-    let next_server_port = normalize_server_port(config.server_port);
+    let next_server_port = normalize_server_port(next.server_port);
     let server_port_changed = current.server_port != next_server_port;
-    current.selected_device = config.selected_device;
-    current.active_model = config.active_model;
-    current.deepseek = config.deepseek;
-    let mut style = config.style;
-    style.normalize();
-    current.style = style;
+    current.selected_device = next.selected_device;
+    current.active_model = next.active_model;
+    current.deepseek = next.deepseek;
+    current.recognition_language = next.recognition_language;
+    current.glossary = next.glossary;
+    current.style = next.style;
     current.server_port = next_server_port;
-    if !config.models.is_empty() {
-        current.models = config.models;
+    if !next.models.is_empty() {
+        current.models = next.models;
     }
     let output = current.clone();
     drop(current);

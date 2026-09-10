@@ -32,6 +32,7 @@ import {
   emptyConfig,
   type AppConfig,
   type AudioDevice,
+  type GlossaryEntry,
   type LogEntry,
   type HardwareInfo,
   type ModelDownloadProgress,
@@ -55,6 +56,8 @@ const cloneStyle = (style: SubtitleStyle): SubtitleStyle => ({
 const cloneConfig = (config: AppConfig): AppConfig => ({
   ...config,
   deepseek: { ...config.deepseek },
+  recognitionLanguage: config.recognitionLanguage || "Chinese",
+  glossary: (config.glossary || []).map((entry) => ({ ...entry })),
   style: cloneStyle(config.style),
 });
 
@@ -82,6 +85,24 @@ const formatBytes = (bytes: number) => {
 };
 
 const formatCount = (value: number) => new Intl.NumberFormat("zh-CN").format(value || 0);
+
+const glossaryToText = (entries: GlossaryEntry[] | undefined) =>
+  (entries || []).map((entry) => `${entry.source}=${entry.target}`).join("\n");
+
+const parseGlossary = (value: string): GlossaryEntry[] =>
+  value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .map((line) => {
+      const separator = line.indexOf("=");
+      if (separator <= 0) return null;
+      return {
+        source: line.slice(0, separator).trim(),
+        target: line.slice(separator + 1).trim(),
+      };
+    })
+    .filter((entry): entry is GlossaryEntry => Boolean(entry?.source && entry.target))
+    .slice(0, 200);
 
 function Icon({ name, size = 18 }: { name: string; size?: number }) {
   const common = { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
@@ -517,7 +538,7 @@ function App() {
 
         <div className="sidebar-bottom">
           <div className="local-card"><div className="local-icon"><Icon name="shield" size={16} /></div><div><strong>本地优先</strong><span>识别在此设备运行</span></div><span className="green-dot" /></div>
-          <div className="version">声译 v0.1.16 <span>·</span> Windows 版</div>
+          <div className="version">声译 v0.1.17 <span>·</span> Windows 版</div>
         </div>
       </aside>
 
@@ -649,6 +670,7 @@ function SettingsPageV2({ config, server, isSaving, onChange, onSave, onTest }: 
   const overlayUrl = server.overlayUrl || `http://${server.host || "127.0.0.1"}:${config.serverPort}/overlay`;
   const editorUrl = server.editorUrl || `http://${server.host || "127.0.0.1"}:${config.serverPort}/editor`;
   const style = config.style;
+  const glossaryText = glossaryToText(config.glossary);
   const updateStyle = (patch: Partial<SubtitleStyle>) => onChange({ style: { ...style, ...patch } });
   const updateCanvas = (field: "canvasWidth" | "canvasHeight", raw: number) => {
     const oldValue = field === "canvasWidth" ? style.canvasWidth : style.canvasHeight;
@@ -664,7 +686,7 @@ function SettingsPageV2({ config, server, isSaving, onChange, onSave, onTest }: 
     const y = position === "top" ? Math.round(style.canvasHeight * 0.16) : position === "center" ? Math.round(style.canvasHeight * 0.5) : Math.round(style.canvasHeight * 0.83);
     updateStyle({ position, subtitleX: Math.round(style.canvasWidth * 0.5), subtitleY: y });
   };
-  return <div className="subpage settings-page"><div className="subpage-intro"><div><p className="section-kicker">PRIVATE CONNECTIONS</p><h2>控制你的字幕管线</h2><p>API Key 只保存在本机配置中，不会发送到 OBS 字幕页面。</p></div><button className="dark-button save-settings" onClick={onSave} disabled={isSaving}>{isSaving ? "保存中…" : "保存全部设置"}</button></div><div className="settings-grid"><section className="panel settings-card"><PanelHeading eyebrow="TRANSLATION" title="DeepSeek 翻译" action={<button className={`toggle ${config.deepseek.enabled ? "on" : ""}`} onClick={() => onChange({ deepseek: { ...config.deepseek, enabled: !config.deepseek.enabled } })}><i /></button>} /><p className="card-description">确认中文句子后发送到 DeepSeek，翻译失败时仍保留本地中文字幕。</p><label className="form-label">API Key<input type="password" value={config.deepseek.apiKey} placeholder="sk-…" onChange={(e) => onChange({ deepseek: { ...config.deepseek, apiKey: e.target.value } })} autoComplete="off" /></label><label className="form-label">API 地址<input value={config.deepseek.baseUrl} onChange={(e) => onChange({ deepseek: { ...config.deepseek, baseUrl: e.target.value } })} /></label><label className="form-label">模型名<input value={config.deepseek.model} onChange={(e) => onChange({ deepseek: { ...config.deepseek, model: e.target.value } })} /></label><button className="outline-button full-button" onClick={onTest}><Icon name="link" size={14} />发送翻译测试</button><div className="security-callout"><Icon name="shield" size={16} /><span><b>密钥隔离</b><small>翻译请求由桌面端发出，OBS 只能看到翻译结果。</small></span></div></section><section className="panel settings-card"><PanelHeading eyebrow="SERVICE" title="局域网字幕服务" /><p className="card-description">服务监听所有网卡，OBS 可以从本机或同一局域网的其他设备访问。</p><label className="form-label">监听端口<input type="number" min={1024} max={65535} value={config.serverPort} onChange={(e) => onChange({ serverPort: Number(e.target.value) || 39071 })} /></label><div className="service-preview"><div><span>OBS 字幕页面</span><b>{overlayUrl}</b></div><span className={`service-live ${server.running ? "" : "offline"}`}><i />{server.running ? "监听中" : "启动中"}</span></div><div className="service-preview"><div><span>样式编辑器</span><b>{editorUrl}</b></div><span className="service-live"><i />可访问</span></div><div className="settings-note"><Icon name="check" size={15} />监听地址：0.0.0.0:{server.port || config.serverPort} · Windows 防火墙首次提示请选择“专用网络”</div></section><section className="panel settings-card canvas-card"><PanelHeading eyebrow="OBS CANVAS" title="画布与字幕位置" /><p className="card-description">Overlay 以画布左上角为原点，X/Y 表示字幕框中心点。OBS 浏览器源建议设置为相同的画布比例。</p><div className="two-fields canvas-fields"><label>画布宽度<input type="number" min={320} max={16384} value={style.canvasWidth} onChange={(e) => updateCanvas("canvasWidth", Number(e.target.value))} /></label><label>画布高度<input type="number" min={180} max={8640} value={style.canvasHeight} onChange={(e) => updateCanvas("canvasHeight", Number(e.target.value))} /></label></div><div className="two-fields canvas-fields"><label>字幕 X<input type="number" min={0} max={style.canvasWidth} value={style.subtitleX} onChange={(e) => updateAnchor("subtitleX", Number(e.target.value))} /></label><label>字幕 Y<input type="number" min={0} max={style.canvasHeight} value={style.subtitleY} onChange={(e) => updateAnchor("subtitleY", Number(e.target.value))} /></label></div><div className="position-presets"><span>快速定位</span><button className={style.position === "top" ? "active" : ""} onClick={() => applyPreset("top")}>顶部</button><button className={style.position === "center" ? "active" : ""} onClick={() => applyPreset("center")}>居中</button><button className={style.position === "bottom" ? "active" : ""} onClick={() => applyPreset("bottom")}>底部</button></div><div className="settings-note"><Icon name="check" size={15} />当前锚点：{style.subtitleX} × {style.subtitleY} · 保存后实时同步到 OBS</div></section></div></div>;
+  return <div className="subpage settings-page"><div className="subpage-intro"><div><p className="section-kicker">PRIVATE CONNECTIONS</p><h2>控制你的字幕管线</h2><p>API Key 只保存在本机配置中，不会发送到 OBS 字幕页面。</p></div><button className="dark-button save-settings" onClick={onSave} disabled={isSaving}>{isSaving ? "保存中…" : "保存全部设置"}</button></div><div className="settings-grid"><section className="panel settings-card"><PanelHeading eyebrow="TRANSLATION" title="DeepSeek 翻译" action={<button className={`toggle ${config.deepseek.enabled ? "on" : ""}`} onClick={() => onChange({ deepseek: { ...config.deepseek, enabled: !config.deepseek.enabled } })}><i /></button>} /><p className="card-description">确认中文句子后发送到 DeepSeek，翻译失败时仍保留本地中文字幕。</p><label className="form-label">识别语言<select value={config.recognitionLanguage || "Chinese"} onChange={(e) => onChange({ recognitionLanguage: e.target.value as AppConfig["recognitionLanguage"] })}><option value="Chinese">中文优先（推荐）</option><option value="Chinese,English">中英混合</option><option value="auto">自动识别</option></select></label><label className="form-label">API Key<input type="password" value={config.deepseek.apiKey} placeholder="sk-…" onChange={(e) => onChange({ deepseek: { ...config.deepseek, apiKey: e.target.value } })} autoComplete="off" /></label><label className="form-label">API 地址<input value={config.deepseek.baseUrl} onChange={(e) => onChange({ deepseek: { ...config.deepseek, baseUrl: e.target.value } })} /></label><label className="form-label">模型名<input value={config.deepseek.model} onChange={(e) => onChange({ deepseek: { ...config.deepseek, model: e.target.value } })} /></label><label className="form-label">本地术语表<textarea rows={5} value={glossaryText} placeholder={"英伟达=NVIDIA\n广播=NVIDIA Broadcast\n实时字幕=live captions"} onChange={(e) => onChange({ glossary: parseGlossary(e.target.value) })} /><small className="form-hint">每行一条“中文术语=固定英文”。只替换命中的词，不发送整张词典；单独命中一条术语时可本地直出，不消耗 API Token。</small></label><button className="outline-button full-button" onClick={onTest}><Icon name="link" size={14} />发送翻译测试</button><div className="security-callout"><Icon name="shield" size={16} /><span><b>密钥隔离</b><small>翻译请求由桌面端发出，OBS 只能看到翻译结果。</small></span></div></section><section className="panel settings-card"><PanelHeading eyebrow="SERVICE" title="局域网字幕服务" /><p className="card-description">服务监听所有网卡，OBS 可以从本机或同一局域网的其他设备访问。</p><label className="form-label">监听端口<input type="number" min={1024} max={65535} value={config.serverPort} onChange={(e) => onChange({ serverPort: Number(e.target.value) || 39071 })} /></label><div className="service-preview"><div><span>OBS 字幕页面</span><b>{overlayUrl}</b></div><span className={`service-live ${server.running ? "" : "offline"}`}><i />{server.running ? "监听中" : "启动中"}</span></div><div className="service-preview"><div><span>样式编辑器</span><b>{editorUrl}</b></div><span className="service-live"><i />可访问</span></div><div className="settings-note"><Icon name="check" size={15} />监听地址：0.0.0.0:{server.port || config.serverPort} · Windows 防火墙首次提示请选择“专用网络”</div></section><section className="panel settings-card canvas-card"><PanelHeading eyebrow="OBS CANVAS" title="画布与字幕位置" /><p className="card-description">Overlay 以画布左上角为原点，X/Y 表示字幕框中心点。OBS 浏览器源建议设置为相同的画布比例。</p><div className="two-fields canvas-fields"><label>画布宽度<input type="number" min={320} max={16384} value={style.canvasWidth} onChange={(e) => updateCanvas("canvasWidth", Number(e.target.value))} /></label><label>画布高度<input type="number" min={180} max={8640} value={style.canvasHeight} onChange={(e) => updateCanvas("canvasHeight", Number(e.target.value))} /></label></div><div className="two-fields canvas-fields"><label>字幕 X<input type="number" min={0} max={style.canvasWidth} value={style.subtitleX} onChange={(e) => updateAnchor("subtitleX", Number(e.target.value))} /></label><label>字幕 Y<input type="number" min={0} max={style.canvasHeight} value={style.subtitleY} onChange={(e) => updateAnchor("subtitleY", Number(e.target.value))} /></label></div><div className="position-presets"><span>快速定位</span><button className={style.position === "top" ? "active" : ""} onClick={() => applyPreset("top")}>顶部</button><button className={style.position === "center" ? "active" : ""} onClick={() => applyPreset("center")}>居中</button><button className={style.position === "bottom" ? "active" : ""} onClick={() => applyPreset("bottom")}>底部</button></div><div className="settings-note"><Icon name="check" size={15} />当前锚点：{style.subtitleX} × {style.subtitleY} · 保存后实时同步到 OBS</div></section></div></div>;
 }
 
 function SettingsPage({ config, server, isSaving, onChange, onSave, onTest }: { config: AppConfig; server: ServerStatus; isSaving: boolean; onChange: (patch: Partial<AppConfig>) => void; onSave: () => void; onTest: () => void }) {

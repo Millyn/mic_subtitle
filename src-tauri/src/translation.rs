@@ -4,7 +4,7 @@ use std::pin::Pin;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
-use crate::state::{AppConfig, AppState, SubtitleEvent};
+use crate::state::{AppConfig, AppState, GlossaryEntry, SubtitleEvent};
 
 #[derive(Debug, Serialize)]
 struct ChatRequest<'a> {
@@ -100,6 +100,9 @@ pub async fn translate_with_usage(
     config: &AppConfig,
     text: &str,
 ) -> Result<TranslationResult, String> {
+    if let Some(result) = local_glossary_translation(text, &config.glossary) {
+        return Ok(result);
+    }
     if !config.deepseek.enabled {
         return Err("翻译功能已禁用".into());
     }
@@ -111,6 +114,10 @@ pub async fn translate_with_usage(
         return Err("DeepSeek API 地址必须以 http:// 或 https:// 开头".into());
     }
     let url = format!("{base}/chat/completions");
+    // Replace only terms that occur in this sentence. The complete glossary
+    // never enters the prompt, so maintaining a large local glossary does not
+    // add a fixed prompt-token cost to every request.
+    let translation_input = apply_local_glossary(text, &config.glossary);
     let system_prompt = "你是实时字幕翻译器。将用户提供的中文准确、自然、简洁地翻译成英文。只输出英文翻译，不要解释，不要加引号。";
     let request = ChatRequest {
         model: config.deepseek.model.trim(),
@@ -121,14 +128,14 @@ pub async fn translate_with_usage(
             },
             ChatMessage {
                 role: "user",
-                content: text,
+                content: &translation_input,
             },
         ],
         temperature: 0.2,
         stream: false,
     };
     let client = reqwest::Client::builder()
-        .user_agent("voice-caption-studio/0.1.16")
+        .user_agent("voice-caption-studio/0.1.17")
         .build()
         .map_err(|error| error.to_string())?;
     let response = client
@@ -154,33 +161,27 @@ pub async fn translate_with_usage(
         .map(|choice| choice.message.content.trim().to_string())
         .filter(|content| !content.is_empty())
         .ok_or_else(|| "DeepSeek 没有返回翻译文本".to_string())?;
-    let estimated_prompt = estimate_tokens(system_prompt) + estimate_tokens(text);
+    let translated_text = normalize_glossary_output(&translated_text, text, &config.glossary);
+    let estimated_prompt = estimate_tokens(system_prompt) + estimate_tokens(&translation_input);
     let estimated_completion = estimate_tokens(&translated_text);
-    let (prompt_tokens, completion_tokens, total_tokens, usage_estimated) =
-        match parsed.usage {
-            Some(usage)
-                if usage.prompt_tokens > 0
-                    || usage.completion_tokens > 0
-                    || usage.total_tokens > 0 => {
-                let total = if usage.total_tokens > 0 {
-                    usage.total_tokens
-                } else {
-                    usage.prompt_tokens.saturating_add(usage.completion_tokens)
-                };
-                (
-                    usage.prompt_tokens,
-                    usage.completion_tokens,
-                    total,
-                    false,
-                )
-            }
-            _ => (
-                estimated_prompt,
-                estimated_completion,
-                estimated_prompt.saturating_add(estimated_completion),
-                true,
-            ),
-        };
+    let (prompt_tokens, completion_tokens, total_tokens, usage_estimated) = match parsed.usage {
+        Some(usage)
+            if usage.prompt_tokens > 0 || usage.completion_tokens > 0 || usage.total_tokens > 0 =>
+        {
+            let total = if usage.total_tokens > 0 {
+                usage.total_tokens
+            } else {
+                usage.prompt_tokens.saturating_add(usage.completion_tokens)
+            };
+            (usage.prompt_tokens, usage.completion_tokens, total, false)
+        }
+        _ => (
+            estimated_prompt,
+            estimated_completion,
+            estimated_prompt.saturating_add(estimated_completion),
+            true,
+        ),
+    };
     Ok(TranslationResult {
         text: translated_text,
         prompt_tokens,
@@ -212,6 +213,10 @@ pub async fn publish_with_translation(
     }
     let config = state.config.read().await.clone();
     if !config.deepseek.enabled {
+        if let Some(result) = local_glossary_translation(&event.chinese, &config.glossary) {
+            event.english = Some(result.text.clone());
+            state.publish_subtitle(event.clone()).await;
+        }
         return (event, None);
     }
     let result = match translate_with_usage(&config, &event.chinese).await {
@@ -228,6 +233,78 @@ pub async fn publish_with_translation(
     (event, result)
 }
 
+/// Translate a subtitle without calling a remote service when it is an exact
+/// glossary entry. This is useful for short fixed labels and costs zero API
+/// tokens; ordinary sentences still go through the configured translator.
+pub fn local_glossary_translation(
+    text: &str,
+    glossary: &[GlossaryEntry],
+) -> Option<TranslationResult> {
+    let source = text.trim();
+    glossary
+        .iter()
+        .find(|entry| entry.source.trim() == source && !entry.target.trim().is_empty())
+        .map(|entry| TranslationResult {
+            text: entry.target.trim().to_string(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            usage_estimated: false,
+        })
+}
+
+fn apply_local_glossary(text: &str, glossary: &[GlossaryEntry]) -> String {
+    let mut entries: Vec<&GlossaryEntry> = glossary
+        .iter()
+        .filter(|entry| {
+            let source = entry.source.trim();
+            !source.is_empty() && !entry.target.trim().is_empty() && text.contains(source)
+        })
+        .collect();
+    // Longest first avoids replacing a short term inside a more specific one.
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.source.trim().chars().count()));
+    let mut result = text.to_string();
+    for entry in entries {
+        result = result.replace(entry.source.trim(), entry.target.trim());
+    }
+    result
+}
+
+fn normalize_glossary_output(
+    translated: &str,
+    source_text: &str,
+    glossary: &[GlossaryEntry],
+) -> String {
+    let mut result = translated.to_string();
+    for entry in glossary {
+        let source = entry.source.trim();
+        let target = entry.target.trim();
+        if !source.is_empty() && !target.is_empty() && source_text.contains(source) {
+            result = replace_ascii_case_insensitive(&result, target, target);
+        }
+    }
+    result
+}
+
+fn replace_ascii_case_insensitive(text: &str, needle: &str, replacement: &str) -> String {
+    if needle.is_empty() || !needle.is_ascii() {
+        return text.to_string();
+    }
+    let lowered = text.to_ascii_lowercase();
+    let lowered_needle = needle.to_ascii_lowercase();
+    let mut result = String::with_capacity(text.len());
+    let mut search_start = 0;
+    while let Some(relative_start) = lowered[search_start..].find(&lowered_needle) {
+        let start = search_start + relative_start;
+        let end = start + needle.len();
+        result.push_str(&text[search_start..start]);
+        result.push_str(replacement);
+        search_start = end;
+    }
+    result.push_str(&text[search_start..]);
+    result
+}
+
 fn truncate(text: &str, max_chars: usize) -> String {
     let mut chars = text.chars();
     let result: String = chars.by_ref().take(max_chars).collect();
@@ -235,5 +312,41 @@ fn truncate(text: &str, max_chars: usize) -> String {
         format!("{result}…")
     } else {
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn glossary() -> Vec<GlossaryEntry> {
+        vec![GlossaryEntry {
+            source: "英伟达广播".into(),
+            target: "NVIDIA Broadcast".into(),
+        }]
+    }
+
+    #[test]
+    fn exact_glossary_entry_is_local_and_zero_token() {
+        let result = local_glossary_translation("英伟达广播", &glossary()).unwrap();
+        assert_eq!(result.text, "NVIDIA Broadcast");
+        assert_eq!(result.total_tokens, 0);
+        assert!(!result.usage_estimated);
+    }
+
+    #[test]
+    fn glossary_replaces_only_matched_terms() {
+        let result = apply_local_glossary("我打开了英伟达广播", &glossary());
+        assert_eq!(result, "我打开了NVIDIA Broadcast");
+    }
+
+    #[test]
+    fn glossary_normalizes_translated_term_casing() {
+        let result = normalize_glossary_output(
+            "I enabled nvidia broadcast",
+            "我打开了英伟达广播",
+            &glossary(),
+        );
+        assert_eq!(result, "I enabled NVIDIA Broadcast");
     }
 }

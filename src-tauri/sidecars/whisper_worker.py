@@ -206,6 +206,55 @@ def inference_context(torch_module: Any) -> Any:
     return nullcontext()
 
 
+def create_voice_detector() -> Any | None:
+    """Create an optional WebRTC VAD used before the ASR decoder.
+
+    The dependency is deliberately optional at runtime: an older manually
+    installed worker still falls back to the adaptive energy gate below.
+    """
+    try:
+        import webrtcvad
+
+        return webrtcvad.Vad(2)
+    except Exception:
+        return None
+
+
+def voice_activity_ratio(detector: Any | None, audio: Any, sample_rate: int) -> float | None:
+    """Return the voiced-frame ratio for a 16 kHz float32 audio block."""
+    if detector is None or sample_rate not in (8000, 16000, 32000, 48000):
+        return None
+    frame_samples = int(sample_rate * 0.03)
+    usable_samples = (len(audio) // frame_samples) * frame_samples
+    if usable_samples <= 0:
+        return None
+    try:
+        import numpy as np
+
+        pcm = np.clip(audio[:usable_samples], -1.0, 1.0)
+        pcm = (pcm * 32767.0).astype(np.int16).tobytes()
+        frame_bytes = frame_samples * 2
+        total_frames = usable_samples // frame_samples
+        voiced_frames = 0
+        for offset in range(0, len(pcm), frame_bytes):
+            frame = pcm[offset : offset + frame_bytes]
+            if len(frame) != frame_bytes:
+                continue
+            voiced_frames += int(detector.is_speech(frame, sample_rate))
+        return voiced_frames / max(1, total_frames)
+    except Exception:
+        return None
+
+
+def faster_whisper_language(language: str) -> str | None:
+    """Map the UI's language choices to faster-whisper's language codes."""
+    if language in ("auto", "Chinese,English"):
+        return None
+    if language == "Chinese":
+        return "zh"
+    return language
+
+
 def read_exact(stream: Any, size: int) -> bytes:
     chunks: list[bytes] = []
     remaining = size
@@ -362,7 +411,7 @@ def main() -> int:
         def transcribe_audio(audio: np.ndarray, _sample_rate: int) -> tuple[str, str]:
             segments, _info = model.transcribe(
                 audio,
-                language=None if args.language == "auto" else args.language,
+                language=faster_whisper_language(args.language),
                 beam_size=3,
                 vad_filter=True,
                 condition_on_previous_text=False,
@@ -542,11 +591,23 @@ def main() -> int:
     peak_rms = 0.0
     last_no_audio_status = 0.0
     sample_rate = 16_000
-    # Keep this gate low enough for laptop/webcam microphones. The ASR model
-    # still decides whether the buffered audio contains actual speech.
-    speech_threshold = 0.003
+    # WebRTC VAD is the primary gate. On machines where the optional package
+    # is unavailable, calibrate the first quiet 1.2 seconds and use a moving
+    # noise floor instead of treating every non-zero microphone sample as
+    # speech. This is what prevents a noisy physical microphone from keeping
+    # one utterance open until the hard safety limit.
+    voice_detector = create_voice_detector()
+    if voice_detector is None:
+        emit_status("microphone", "未启用 WebRTC VAD，正在校准自适应噪声底…")
+    else:
+        emit_status("microphone", "已启用 WebRTC VAD，底噪不会单独触发断句")
+    noise_floor = 0.003
+    calibration_target_samples = int(sample_rate * 1.2)
+    calibration_samples = 0
+    calibration_levels: list[float] = []
+    calibration_complete = voice_detector is not None
     min_utterance_samples = int(sample_rate * 0.5)
-    silence_to_finalize_samples = int(sample_rate * 0.6)
+    silence_to_finalize_samples = int(sample_rate * 0.7)
     max_utterance_samples = int(sample_rate * 10.0)
 
     try:
@@ -561,8 +622,45 @@ def main() -> int:
                 continue
             chunk = resample_audio(input_chunk, capture_rate, sample_rate)
             rms = float(np.sqrt(np.mean(np.square(chunk)))) if len(chunk) else 0.0
+            vad_ratio = voice_activity_ratio(voice_detector, chunk, sample_rate)
+            if vad_ratio is not None:
+                speech_active = vad_ratio >= 0.20
+                if not had_speech and not speech_active:
+                    noise_floor = (noise_floor * 0.98) + (max(rms, 0.0005) * 0.02)
+            else:
+                if not calibration_complete:
+                    # A quiet startup period is background calibration. A
+                    # clearly loud first block is treated as speech so a user
+                    # does not lose the first sentence after pressing Start.
+                    if rms <= 0.02:
+                        calibration_levels.append(rms)
+                        calibration_samples += len(chunk)
+                        pre_roll.append(chunk)
+                        if calibration_samples < calibration_target_samples:
+                            continue
+                        ordered_levels = sorted(calibration_levels)
+                        noise_floor = max(
+                            0.0005,
+                            ordered_levels[max(0, len(ordered_levels) // 3)],
+                        )
+                        calibration_complete = True
+                        pre_roll.clear()
+                        emit_status(
+                            "microphone",
+                            f"噪声底校准完成（RMS {noise_floor:.4f}），将按自然停顿断句",
+                        )
+                        continue
+                    noise_floor = max(
+                        0.0005,
+                        min(calibration_levels, default=0.003),
+                    )
+                    calibration_complete = True
+                    emit_status("microphone", "检测到语音，跳过启动噪声校准")
+                on_threshold = max(0.006, noise_floor * 1.6)
+                off_threshold = max(0.003, noise_floor * 1.18)
+                speech_active = rms > (off_threshold if had_speech else on_threshold)
             if not had_speech:
-                if rms <= speech_threshold:
+                if not speech_active:
                     pre_roll.append(chunk)
                     continue
                 chunks = list(pre_roll) + [chunk]
@@ -576,7 +674,7 @@ def main() -> int:
             chunks.append(chunk)
             buffered_samples += len(chunk)
             peak_rms = max(peak_rms, rms)
-            if rms > speech_threshold:
+            if speech_active:
                 silence_samples = 0
             else:
                 silence_samples += len(chunk)

@@ -1,6 +1,6 @@
 [package]
 name = "voice-caption-studio"
-version = "0.1.16"
+version = "0.1.17"
 description = "本地优先的实时中英字幕工具"
 authors = ["Voice Caption Studio"]
 edition = "2021"

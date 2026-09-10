@@ -57,7 +57,12 @@ pub async fn start(
     }
     let session_token_usage = state.reset_token_session().await;
 
-    let mut command = worker_command(&app, &path, device_name.as_deref())?;
+    let mut command = worker_command(
+        &app,
+        &path,
+        device_name.as_deref(),
+        config.recognition_language.as_str(),
+    )?;
     let diagnostics_log = open_diagnostics_log();
     write_diagnostic(
         &diagnostics_log,
@@ -346,6 +351,7 @@ fn worker_command(
     app: &AppHandle,
     model_path: &PathBuf,
     device_name: Option<&str>,
+    language: &str,
 ) -> Result<Command, String> {
     let mut command = if let Ok(path) = std::env::var("WHISPER_WORKER_PATH") {
         Command::new(path)
@@ -369,7 +375,7 @@ fn worker_command(
         .arg("--compute-type")
         .arg("auto")
         .arg("--language")
-        .arg("auto")
+        .arg(language)
         .arg("--stdin-audio");
     if let Some(device) = device_name.filter(|name| !name.trim().is_empty()) {
         command.arg("--device-name").arg(device);

@@ -344,7 +344,7 @@ async fn download_model_inner(
         .await
         .map_err(|error| error.to_string())?;
     let client = reqwest::Client::builder()
-        .user_agent("voice-caption-studio/0.1.16")
+        .user_agent("voice-caption-studio/0.1.17")
         .connect_timeout(Duration::from_secs(DOWNLOAD_CONNECT_TIMEOUT_SECS))
         .read_timeout(Duration::from_secs(DOWNLOAD_READ_TIMEOUT_SECS))
         .redirect(reqwest::redirect::Policy::limited(10))
@@ -753,7 +753,7 @@ async fn download_file_with_curl(
                 "--output",
             ])
             .arg(target)
-            .args(["--user-agent", "voice-caption-studio/0.1.16"])
+            .args(["--user-agent", "voice-caption-studio/0.1.17"])
             .arg(&url)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
