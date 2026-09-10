@@ -94,14 +94,15 @@ const parseGlossary = (value: string): GlossaryEntry[] =>
     .split(/\r?\n/)
     .map((line) => line.trim())
     .map((line) => {
+      if (!line) return null;
       const separator = line.indexOf("=");
-      if (separator <= 0) return null;
+      if (separator < 0) return { source: line, target: "" };
       return {
         source: line.slice(0, separator).trim(),
         target: line.slice(separator + 1).trim(),
       };
     })
-    .filter((entry): entry is GlossaryEntry => Boolean(entry?.source && entry.target))
+    .filter((entry): entry is GlossaryEntry => Boolean(entry?.source))
     .slice(0, 200);
 
 function Icon({ name, size = 18 }: { name: string; size?: number }) {
