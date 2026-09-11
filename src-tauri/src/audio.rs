@@ -462,7 +462,7 @@ fn emit_level<I>(app: &AppHandle, samples: I, channels: usize, last_emit: &mut I
 where
     I: Iterator<Item = f32>,
 {
-    if last_emit.elapsed() < Duration::from_millis(55) {
+    if last_emit.elapsed() < Duration::from_millis(100) {
         return;
     }
     let mut sum = 0.0_f32;

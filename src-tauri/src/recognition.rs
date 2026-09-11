@@ -20,12 +20,31 @@ struct WorkerEvent {
     kind: Option<String>,
     text: Option<String>,
     chinese: Option<String>,
+    language: Option<String>,
     error: Option<String>,
     level: Option<f32>,
     #[serde(rename = "asrTokens")]
     asr_tokens: Option<u64>,
     #[serde(rename = "asrTokensEstimated")]
     asr_tokens_estimated: Option<bool>,
+}
+
+fn infer_language(text: &str) -> Option<String> {
+    let has_cjk = text.chars().any(|character| {
+        ('\u{3400}'..='\u{4dbf}').contains(&character)
+            || ('\u{4e00}'..='\u{9fff}').contains(&character)
+            || ('\u{f900}'..='\u{faff}').contains(&character)
+    });
+    let has_latin = text
+        .chars()
+        .any(|character| character.is_ascii_alphabetic());
+    if has_latin && !has_cjk {
+        Some("English".into())
+    } else if has_cjk {
+        Some("Chinese".into())
+    } else {
+        None
+    }
 }
 
 pub async fn start(
@@ -220,11 +239,12 @@ pub async fn start(
                     if text.is_empty() || (kind != "partial" && kind != "final") {
                         continue;
                     }
+                    let detected_language = event.language.or_else(|| infer_language(&text));
                     // The overlay consumes the WebSocket broadcast below, but the
                     // desktop preview listens to Tauri's `subtitle` event. Keep
                     // both consumers on the same event stream so a successful
                     // worker result is visible in the app window as well.
-                    let subtitle = SubtitleEvent::new(kind, text);
+                    let subtitle = SubtitleEvent::with_language(kind, text, detected_language);
                     let _ = worker_app.emit("subtitle", &subtitle);
                     let app_state = worker_state.clone();
                     let subtitle_app = worker_app.clone();
@@ -401,6 +421,14 @@ fn worker_command(
             command.arg("--disable-vad");
         }
     }
+    #[cfg(windows)]
+    {
+        // Keep the Python worker hidden even when the selected interpreter is
+        // a console launcher. pythonw/pyw are preferred below as an additional
+        // safeguard, but this flag also covers explicit custom paths.
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
     Ok(command)
 }
 
@@ -416,10 +444,11 @@ fn python_worker_command() -> Result<Command, String> {
 
     #[cfg(windows)]
     {
-        // The trial instructions install dependencies through `py -3 -m pip`.
-        // Prefer the same Windows Python launcher when starting the worker;
-        // on many machines `python.exe` is only a Microsoft Store alias.
+        // Prefer windowed Python launchers so recognition never opens a
+        // console window. worker_command also applies CREATE_NO_WINDOW.
         for (program, launcher_args) in [
+            ("pyw.exe", vec!["-3"]),
+            ("pythonw.exe", Vec::new()),
             ("py.exe", vec!["-3"]),
             ("python.exe", Vec::new()),
             ("python3.exe", Vec::new()),

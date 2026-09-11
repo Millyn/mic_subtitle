@@ -13,6 +13,7 @@ pub const DEFAULT_CANVAS_WIDTH: u32 = 1920;
 pub const DEFAULT_CANVAS_HEIGHT: u32 = 1080;
 pub const DEFAULT_SUBTITLE_X: u32 = DEFAULT_CANVAS_WIDTH / 2;
 pub const DEFAULT_SUBTITLE_Y: u32 = 900;
+pub const CONFIG_VERSION: u32 = 1;
 
 pub fn default_server_port() -> u16 {
     DEFAULT_SERVER_PORT
@@ -27,7 +28,7 @@ pub fn normalize_server_port(port: u16) -> u16 {
 }
 
 pub fn default_recognition_language() -> String {
-    "Chinese".into()
+    "auto".into()
 }
 
 fn default_true() -> bool {
@@ -52,6 +53,10 @@ fn default_subtitle_x() -> u32 {
 
 fn default_subtitle_y() -> u32 {
     DEFAULT_SUBTITLE_Y
+}
+
+fn default_hide_after_seconds() -> u32 {
+    10
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +88,8 @@ pub struct SubtitleStyle {
     pub line_spacing: f32,
     pub show_temporary: bool,
     pub show_final: bool,
+    #[serde(default = "default_hide_after_seconds")]
+    pub hide_after_seconds: u32,
     pub background_color: String,
     pub background_opacity: f32,
     pub outline_width: u32,
@@ -116,6 +123,7 @@ impl Default for SubtitleStyle {
             line_spacing: 1.3,
             show_temporary: true,
             show_final: true,
+            hide_after_seconds: 10,
             background_color: "#07111f".into(),
             background_opacity: 0.68,
             outline_width: 2,
@@ -133,6 +141,7 @@ impl SubtitleStyle {
         self.subtitle_y = self.subtitle_y.min(self.canvas_height);
         self.max_width = self.max_width.clamp(200, self.canvas_width);
         self.line_spacing = self.line_spacing.clamp(0.8, 3.0);
+        self.hide_after_seconds = self.hide_after_seconds.clamp(1, 300);
         self.background_opacity = self.background_opacity.clamp(0.0, 1.0);
         self.chinese.opacity = self.chinese.opacity.clamp(0.0, 1.0);
         self.english.opacity = self.english.opacity.clamp(0.0, 1.0);
@@ -246,6 +255,8 @@ pub struct ModelFileRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
+    #[serde(default)]
+    pub config_version: u32,
     pub selected_device: Option<String>,
     pub active_model: String,
     pub deepseek: DeepSeekConfig,
@@ -265,6 +276,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            config_version: CONFIG_VERSION,
             selected_device: None,
             active_model: "qwen3-asr-0.6b".into(),
             deepseek: DeepSeekConfig::default(),
@@ -280,6 +292,7 @@ impl Default for AppConfig {
 
 impl AppConfig {
     pub fn normalize(&mut self) {
+        self.config_version = CONFIG_VERSION;
         self.style.normalize();
         if !matches!(
             self.recognition_language.as_str(),
@@ -287,8 +300,8 @@ impl AppConfig {
         ) {
             self.recognition_language = default_recognition_language();
         }
-        let mut normalized = Vec::with_capacity(self.glossary.len().min(200));
-        for entry in self.glossary.drain(..).take(200) {
+        let mut normalized = Vec::with_capacity(self.glossary.len());
+        for entry in self.glossary.drain(..) {
             let source = entry.source.trim();
             let target = entry.target.trim();
             if source.is_empty() || target.is_empty() {
@@ -321,6 +334,8 @@ pub struct SubtitleEvent {
     pub timestamp: u64,
     pub kind: String,
     pub chinese: String,
+    #[serde(default)]
+    pub language: Option<String>,
     #[serde(default)]
     pub english: Option<String>,
     #[serde(default)]
@@ -387,9 +402,20 @@ impl SubtitleEvent {
             timestamp: now_millis(),
             kind: kind.into(),
             chinese: chinese.into(),
+            language: None,
             english: None,
             translation_error: None,
         }
+    }
+
+    pub fn with_language(
+        kind: impl Into<String>,
+        chinese: impl Into<String>,
+        language: Option<String>,
+    ) -> Self {
+        let mut event = Self::new(kind, chinese);
+        event.language = language.filter(|value| !value.trim().is_empty());
+        event
     }
 }
 
@@ -546,6 +572,12 @@ fn read_config(path: &Path) -> Result<AppConfig, String> {
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
     let mut config: AppConfig =
         serde_json::from_slice(&bytes).map_err(|error| format!("配置文件损坏：{error}"))?;
+    // v0.1.20 and earlier wrote the implicit default as Chinese-only. Treat
+    // that unversioned value as the old default once, while preserving any
+    // language choice made explicitly after this migration.
+    if config.config_version == 0 && config.recognition_language == "Chinese" {
+        config.recognition_language = default_recognition_language();
+    }
     config.normalize();
     Ok(config)
 }

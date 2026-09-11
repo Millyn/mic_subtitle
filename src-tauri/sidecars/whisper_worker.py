@@ -337,7 +337,7 @@ def main() -> int:
             device = "cuda:0" if use_cuda else "cpu"
             dtype = torch.float16 if use_cuda else torch.float32
             if not use_cuda:
-                cpu_threads = max(1, min(4, (os.cpu_count() or 4) // 2))
+                cpu_threads = max(1, min(3, (os.cpu_count() or 4) // 2))
                 try:
                     torch.set_num_threads(cpu_threads)
                 except Exception:
@@ -355,7 +355,7 @@ def main() -> int:
                 dtype=dtype,
                 device_map=device,
                 max_inference_batch_size=1,
-                max_new_tokens=256,
+                max_new_tokens=128,
                 local_files_only=True,
             )
             configure_qwen_generation(model)
@@ -371,7 +371,7 @@ def main() -> int:
             return 3
 
         def transcribe_audio(audio: np.ndarray, sample_rate: int) -> tuple[str, str]:
-            language = None if args.language == "auto" else args.language
+            language = None if args.language in ("auto", "Chinese,English") else args.language
             with inference_context(torch):
                 results = model.transcribe(
                     audio=(audio.astype(np.float32, copy=False), sample_rate),
@@ -386,7 +386,7 @@ def main() -> int:
             # gate has already detected speech. Retry only that case with the
             # documented Chinese language hint; English and other languages
             # still use automatic detection on the first pass.
-            if not text and language is None:
+            if not text and args.language == "Chinese":
                 with inference_context(torch):
                     fallback_results = model.transcribe(
                         audio=(audio.astype(np.float32, copy=False), sample_rate),
@@ -407,7 +407,7 @@ def main() -> int:
                 str(model_path),
                 device=args.device,
                 compute_type=compute_type,
-                cpu_threads=max(1, min(4, (os.cpu_count() or 4) // 2)),
+                cpu_threads=max(1, min(3, (os.cpu_count() or 4) // 2)),
                 num_workers=1,
             )
         except Exception as error:  # pragma: no cover - depends on local CUDA/model
@@ -415,14 +415,15 @@ def main() -> int:
             return 3
 
         def transcribe_audio(audio: np.ndarray, _sample_rate: int) -> tuple[str, str]:
-            segments, _info = model.transcribe(
+            segments, info = model.transcribe(
                 audio,
                 language=faster_whisper_language(args.language),
-                beam_size=3,
+                beam_size=2,
                 vad_filter=True,
                 condition_on_previous_text=False,
             )
-            return " ".join(segment.text.strip() for segment in segments).strip(), ""
+            detected_language = str(getattr(info, "language", "") or "").strip()
+            return " ".join(segment.text.strip() for segment in segments).strip(), detected_language
 
     # Inference can be slower than realtime on a CPU. A bounded queue keeps
     # recognition focused on recent audio instead of building an unbounded
@@ -566,13 +567,16 @@ def main() -> int:
 
     def report_audio_level() -> None:
         last_status_report = time.monotonic() - 2.0
-        while not level_stop.wait(0.1):
+        last_emitted_level = -1.0
+        while not level_stop.wait(0.2):
             now = time.monotonic()
             level = min(1.0, latest_rms * 8.0)
             callback_age = now - last_callback_time
             if callback_age > 0.25:
                 level = 0.0
-            emit({"type": "audio-level", "level": level})
+            if last_emitted_level < 0.0 or abs(level - last_emitted_level) >= 0.01:
+                emit({"type": "audio-level", "level": level})
+                last_emitted_level = level
             if now - last_status_report >= 2.0:
                 if received_samples == 0:
                     message = "设备流已启动，但尚未收到音频回调；请检查 Windows 麦克风权限和 NVIDIA Broadcast 输出"
@@ -583,8 +587,13 @@ def main() -> int:
                 emit_status("microphone", message)
                 last_status_report = now
 
-    level_thread = threading.Thread(target=report_audio_level, name="audio-level", daemon=True)
-    level_thread.start()
+    # Rust/cpal already publishes the exact same stream's input level in
+    # desktop mode. Avoid a second timer and duplicate UI event source there;
+    # the worker-side meter remains available for standalone direct capture.
+    level_thread = None
+    if not args.stdin_audio:
+        level_thread = threading.Thread(target=report_audio_level, name="audio-level", daemon=True)
+        level_thread.start()
     # Qwen3-ASR's Transformers backend is a complete-utterance decoder, not
     # a low-latency partial decoder. Keep a short pre-roll, wait for a natural
     # pause, and submit one complete utterance instead of repeatedly decoding
@@ -745,7 +754,8 @@ def main() -> int:
         pass
     finally:
         level_stop.set()
-        level_thread.join(timeout=1.0)
+        if level_thread is not None:
+            level_thread.join(timeout=1.0)
         pipe_stop.set()
         if pipe_thread is not None:
             pipe_thread.join(timeout=1.0)

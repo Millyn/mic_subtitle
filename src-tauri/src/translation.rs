@@ -100,8 +100,19 @@ pub async fn translate_with_usage(
     config: &AppConfig,
     text: &str,
 ) -> Result<TranslationResult, String> {
-    if let Some(result) = local_glossary_translation(text, &config.glossary) {
-        return Ok(result);
+    translate_with_language(config, text, None).await
+}
+
+pub async fn translate_with_language(
+    config: &AppConfig,
+    text: &str,
+    source_language: Option<&str>,
+) -> Result<TranslationResult, String> {
+    let english_source = source_language.map(is_english_language).unwrap_or(false);
+    if !english_source {
+        if let Some(result) = local_glossary_translation(text, &config.glossary) {
+            return Ok(result);
+        }
     }
     if !config.deepseek.enabled {
         return Err("翻译功能已禁用".into());
@@ -116,9 +127,19 @@ pub async fn translate_with_usage(
     let url = format!("{base}/chat/completions");
     // Replace only terms that occur in this sentence. The complete glossary
     // never enters the prompt, so maintaining a large local glossary does not
-    // add a fixed prompt-token cost to every request.
-    let translation_input = apply_local_glossary(text, &config.glossary);
-    let system_prompt = "你是实时字幕翻译器。将用户提供的中文准确、自然、简洁地翻译成英文。只输出英文翻译，不要解释，不要加引号。";
+    // add a fixed prompt-token cost to every request. English input is kept
+    // unchanged because the glossary is defined as Chinese/original -> fixed
+    // English terminology.
+    let translation_input = if english_source {
+        text.to_string()
+    } else {
+        apply_local_glossary(text, &config.glossary)
+    };
+    let system_prompt = if english_source {
+        "你是实时字幕翻译器。将用户提供的英文准确、自然、简洁地翻译成中文。只输出中文翻译，不要解释，不要加引号。"
+    } else {
+        "你是实时字幕翻译器。将用户提供的中文准确、自然、简洁地翻译成英文。只输出英文翻译，不要解释，不要加引号。"
+    };
     let request = ChatRequest {
         model: config.deepseek.model.trim(),
         messages: vec![
@@ -135,7 +156,7 @@ pub async fn translate_with_usage(
         stream: false,
     };
     let client = reqwest::Client::builder()
-        .user_agent("voice-caption-studio/0.1.18")
+        .user_agent("voice-caption-studio/0.1.22")
         .build()
         .map_err(|error| error.to_string())?;
     let response = client
@@ -161,7 +182,11 @@ pub async fn translate_with_usage(
         .map(|choice| choice.message.content.trim().to_string())
         .filter(|content| !content.is_empty())
         .ok_or_else(|| "DeepSeek 没有返回翻译文本".to_string())?;
-    let translated_text = normalize_glossary_output(&translated_text, text, &config.glossary);
+    let translated_text = if english_source {
+        translated_text
+    } else {
+        normalize_glossary_output(&translated_text, text, &config.glossary)
+    };
     let estimated_prompt = estimate_tokens(system_prompt) + estimate_tokens(&translation_input);
     let estimated_completion = estimate_tokens(&translated_text);
     let (prompt_tokens, completion_tokens, total_tokens, usage_estimated) = match parsed.usage {
@@ -191,6 +216,14 @@ pub async fn translate_with_usage(
     })
 }
 
+fn is_english_language(language: &str) -> bool {
+    let normalized = language.trim().to_ascii_lowercase();
+    normalized == "english"
+        || normalized == "en"
+        || normalized.starts_with("en-")
+        || normalized.starts_with("english ")
+}
+
 fn estimate_tokens(text: &str) -> u64 {
     let count = text.chars().count() as u64;
     if count == 0 {
@@ -213,22 +246,25 @@ pub async fn publish_with_translation(
     }
     let config = state.config.read().await.clone();
     if !config.deepseek.enabled {
-        if let Some(result) = local_glossary_translation(&event.chinese, &config.glossary) {
-            event.english = Some(result.text.clone());
-            state.publish_subtitle(event.clone()).await;
+        if !is_english_language(event.language.as_deref().unwrap_or("")) {
+            if let Some(result) = local_glossary_translation(&event.chinese, &config.glossary) {
+                event.english = Some(result.text.clone());
+                state.publish_subtitle(event.clone()).await;
+            }
         }
         return (event, None);
     }
-    let result = match translate_with_usage(&config, &event.chinese).await {
-        Ok(result) => {
-            event.english = Some(result.text.clone());
-            Some(result)
-        }
-        Err(error) => {
-            event.translation_error = Some(error);
-            None
-        }
-    };
+    let result =
+        match translate_with_language(&config, &event.chinese, event.language.as_deref()).await {
+            Ok(result) => {
+                event.english = Some(result.text.clone());
+                Some(result)
+            }
+            Err(error) => {
+                event.translation_error = Some(error);
+                None
+            }
+        };
     state.publish_subtitle(event.clone()).await;
     (event, result)
 }
@@ -348,5 +384,13 @@ mod tests {
             &glossary(),
         );
         assert_eq!(result, "I enabled NVIDIA Broadcast");
+    }
+
+    #[test]
+    fn english_language_variants_are_detected() {
+        assert!(is_english_language("English"));
+        assert!(is_english_language("en"));
+        assert!(is_english_language("en-US"));
+        assert!(!is_english_language("Chinese"));
     }
 }

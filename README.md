@@ -1,6 +1,6 @@
 # 声译 · 实时字幕工作台
 
-Windows 10/11 的本地优先实时中英字幕工具。桌面端使用 Tauri 2 + React + TypeScript，音频输入电平和模型/配置管理由 Rust 负责；识别由 faster-whisper 或 2026 Qwen3-ASR sidecar 负责；DeepSeek 只接收已确认的中文句子。
+Windows 10/11 的本地优先实时中英字幕工具。桌面端使用 Tauri 2 + React + TypeScript，音频输入电平和模型/配置管理由 Rust 负责；识别由 faster-whisper 或 2026 Qwen3-ASR sidecar 负责；DeepSeek 只接收已确认的中英文句子，并按识别语言选择翻译方向。
 
 ## 已实现
 
@@ -80,7 +80,7 @@ pip install -r src-tauri/sidecars/requirements.txt
 
 ## Windows 试用包
 
-当前工作区会生成带版本号的 Windows 试用包，例如 `dist-windows/voice-caption-studio-v0.1.18-windows-x64.zip`。解压后双击 `声译-实时字幕工作台.exe` 即可启动桌面端；压缩包内已带 Windows loader、Rust 运行库和 worker 脚本。Windows 10/11 还需要系统安装 WebView2 Runtime。
+当前工作区会生成带版本号的 Windows 试用包，例如 `dist-windows/voice-caption-studio-v0.1.22-windows-x64.zip`。生产 Windows 包必须启用 `custom-protocol` feature，以便将 `dist/` 前端资源嵌入可执行文件；解压后双击 `声译-实时字幕工作台.exe` 即可启动桌面端。压缩包内已带 Windows loader、Rust 运行库和 worker 脚本。术语表导出文件会写入程序目录下的 `exports/`；术语条数不设上限。OBS Overlay 默认在 10 秒没有新字幕后自动隐藏，可在“连接与设置”中调整为 1–300 秒。Windows 10/11 还需要系统安装 WebView2 Runtime。
 
 若要使用真实语音识别，在解压目录打开 PowerShell，先安装 64 位 Python 运行时和依赖：
 

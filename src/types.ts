@@ -29,6 +29,7 @@ export interface SubtitleStyle {
   lineSpacing: number;
   showTemporary: boolean;
   showFinal: boolean;
+  hideAfterSeconds: number;
   backgroundColor: string;
   backgroundOpacity: number;
   outlineWidth: number;
@@ -59,6 +60,7 @@ export interface NoiseProfile {
 }
 
 export interface AppConfig {
+  configVersion: number;
   selectedDevice: string | null;
   activeModel: string;
   deepseek: DeepSeekConfig;
@@ -92,6 +94,7 @@ export interface SubtitleEvent {
   timestamp: number;
   kind: "partial" | "final";
   chinese: string;
+  language?: string;
   english?: string;
   translationError?: string;
 }
@@ -175,6 +178,7 @@ export const defaultStyle: SubtitleStyle = {
   lineSpacing: 1.3,
   showTemporary: true,
   showFinal: true,
+  hideAfterSeconds: 10,
   backgroundColor: "#07111f",
   backgroundOpacity: 0.68,
   outlineWidth: 2,
@@ -183,6 +187,7 @@ export const defaultStyle: SubtitleStyle = {
 };
 
 export const emptyConfig: AppConfig = {
+  configVersion: 1,
   selectedDevice: null,
   activeModel: "qwen3-asr-0.6b",
   deepseek: {
@@ -191,7 +196,7 @@ export const emptyConfig: AppConfig = {
     baseUrl: "https://api.deepseek.com",
     model: "deepseek-chat",
   },
-  recognitionLanguage: "Chinese",
+  recognitionLanguage: "auto",
   glossary: [],
   noiseProfiles: {},
   style: defaultStyle,

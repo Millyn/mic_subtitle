@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppConfig,
   AudioDevice,
+  GlossaryEntry,
   ModelDownloadProgress,
   ModelView,
   HardwareInfo,
@@ -39,6 +40,10 @@ export async function getConfig(): Promise<AppConfig> {
 
 export async function saveConfig(config: AppConfig): Promise<AppConfig> {
   return call<AppConfig>("save_config", { config });
+}
+
+export async function exportGlossary(glossary: GlossaryEntry[]): Promise<string> {
+  return call<string>("export_glossary", { glossary });
 }
 
 export async function getAudioDevices(): Promise<AudioDevice[]> {

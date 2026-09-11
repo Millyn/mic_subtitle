@@ -9,8 +9,14 @@ mod state;
 mod translation;
 
 use models::ModelView;
-use state::{normalize_server_port, AppConfig, AppState, SubtitleEvent, SubtitleStyle};
-use tauri::{AppHandle, Emitter, Manager, State};
+use state::{
+    normalize_server_port, AppConfig, AppState, GlossaryEntry, SubtitleEvent, SubtitleStyle,
+};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, Manager, State, WindowEvent,
+};
 
 #[tauri::command]
 async fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
@@ -42,6 +48,40 @@ async fn save_config(state: State<'_, AppState>, config: AppConfig) -> Result<Ap
         server::restart(&state).await;
     }
     Ok(output)
+}
+
+#[tauri::command]
+fn export_glossary(
+    state: State<'_, AppState>,
+    glossary: Vec<GlossaryEntry>,
+) -> Result<String, String> {
+    let export_dir = state
+        .config_path
+        .parent()
+        .ok_or_else(|| "无法定位程序目录，术语表导出失败".to_string())?
+        .join("exports");
+    std::fs::create_dir_all(&export_dir)
+        .map_err(|error| format!("无法创建术语表导出目录：{error}"))?;
+    let entries: Vec<GlossaryEntry> = glossary
+        .into_iter()
+        .map(|entry| GlossaryEntry {
+            source: entry.source.trim().to_string(),
+            target: entry.target.trim().to_string(),
+        })
+        .filter(|entry| !entry.source.is_empty() && !entry.target.is_empty())
+        .collect();
+    let payload = serde_json::to_vec_pretty(&serde_json::json!({
+        "version": 1,
+        "entries": entries,
+    }))
+    .map_err(|error| format!("术语表 JSON 生成失败：{error}"))?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let path = export_dir.join(format!("voice-caption-glossary-{timestamp}.json"));
+    std::fs::write(&path, payload).map_err(|error| format!("术语表文件写入失败：{error}"))?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -242,6 +282,15 @@ impl ServerStatus {
 
 pub fn run() {
     tauri::Builder::default()
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                // Closing the window keeps the recognition service alive and
+                // moves the app to the Windows notification area. The tray
+                // menu provides the explicit exit action.
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .setup(|app| {
             let executable_dir = std::env::current_exe()
                 .map_err(|error| format!("无法定位程序目录：{error}"))?
@@ -255,11 +304,46 @@ pub fn run() {
             let state = AppState::new(executable_dir.join("config.json"), models_dir)?;
             app.manage(state.clone());
             server::spawn(state);
+
+            let show_item = MenuItem::with_id(app, "show", "打开主窗口", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "退出声译", true, None::<&str>)?;
+            let tray_menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            let tray_icon = tauri::include_image!("icons/icon.png");
+            TrayIconBuilder::with_id("main-tray")
+                .icon(tray_icon)
+                .tooltip("声译 · 实时字幕工作台")
+                .menu(&tray_menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        if let Some(window) = tray.app_handle().get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_config,
             save_config,
+            export_glossary,
             list_audio_devices,
             start_audio_monitor,
             stop_audio_monitor,
